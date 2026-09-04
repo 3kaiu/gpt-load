@@ -52,6 +52,7 @@ type kiroRotationMonitor struct {
 	byID   map[uint]kiroRotationState
 }
 
+// newKiroRotationMonitor creates a new Kiro rotation monitor.
 func newKiroRotationMonitor(logger *logrus.Logger) *kiroRotationMonitor {
 	if logger == nil {
 		logger = logrus.StandardLogger()
@@ -59,6 +60,7 @@ func newKiroRotationMonitor(logger *logrus.Logger) *kiroRotationMonitor {
 	return &kiroRotationMonitor{logger: logger, byID: make(map[uint]kiroRotationState)}
 }
 
+// shouldAttempt checks if a rotation attempt should be made.
 func (monitor *kiroRotationMonitor) shouldAttempt(id uint, cooldown time.Duration, now time.Time) bool {
 	if monitor == nil {
 		return true
@@ -72,6 +74,7 @@ func (monitor *kiroRotationMonitor) shouldAttempt(id uint, cooldown time.Duratio
 	return now.Sub(state.lastAttempt) >= cooldown
 }
 
+// noteAttempt records a rotation attempt.
 func (monitor *kiroRotationMonitor) noteAttempt(id uint, now time.Time) {
 	if monitor == nil {
 		return
@@ -137,6 +140,7 @@ func (s *Service) rotateKiroSubscriptionCredentials(ctx context.Context) {
 		Debug("Kiro rotation cycle complete")
 }
 
+// loadActiveKiroSubscriptionGroups loads active Kiro subscription groups.
 func (s *Service) loadActiveKiroSubscriptionGroups(ctx context.Context) ([]models.Group, error) {
 	var groups []models.Group
 	err := s.db.WithContext(ctx).
@@ -149,6 +153,7 @@ func (s *Service) loadActiveKiroSubscriptionGroups(ctx context.Context) ([]model
 	return groups, nil
 }
 
+// loadActiveGroupCredentials loads active credentials for a group.
 func (s *Service) loadActiveGroupCredentials(ctx context.Context, groupID uint) ([]models.Credential, error) {
 	var rows []models.Credential
 	err := s.db.WithContext(ctx).
@@ -390,6 +395,7 @@ func kiroPrimaryQuotaUsage(observation subscriptionruntime.Observation) (float64
 	return 0, false
 }
 
+// logRotationFailure logs a rotation failure.
 func (s *Service) logRotationFailure(stage string, credentialID uint, err error) {
 	s.rotationMonitor.logger.WithField("event", "kiro.rotation.failed").
 		WithField("stage", stage).
@@ -398,6 +404,7 @@ func (s *Service) logRotationFailure(stage string, credentialID uint, err error)
 		Warn("Kiro account rotation step failed")
 }
 
+// logRotationInfo logs a rotation info message.
 func (s *Service) logRotationInfo(credentialID uint, action string, usage float64, _ error) {
 	s.rotationMonitor.logger.WithField("event", "kiro.rotation."+action).
 		WithField("credential_id", credentialID).

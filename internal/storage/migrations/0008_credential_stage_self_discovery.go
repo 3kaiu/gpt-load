@@ -43,6 +43,7 @@ func Up0008(db *gorm.DB) error {
 	return nil
 }
 
+// createCredentialStageAuthMethodCheck0008 creates the widened authorization_method CHECK constraint.
 func createCredentialStageAuthMethodCheck0008(db *gorm.DB) error {
 	table := quoteMigrationIdentifier0006(db, credentialStageTable0008)
 	name := quoteMigrationIdentifier0006(db, authMethodConstraint0008)
@@ -54,6 +55,7 @@ func createCredentialStageAuthMethodCheck0008(db *gorm.DB) error {
 	return nil
 }
 
+// dropCredentialStageAuthMethodCheck0008 drops the existing authorization_method CHECK constraint.
 func dropCredentialStageAuthMethodCheck0008(db *gorm.DB) error {
 	if strings.EqualFold(db.Dialector.Name(), "mysql") {
 		if dialector, ok := db.Dialector.(*gormmysql.Dialector); ok && dialector.Config != nil &&
@@ -66,6 +68,7 @@ func dropCredentialStageAuthMethodCheck0008(db *gorm.DB) error {
 	return db.Migrator().DropConstraint(credentialStageTable0008, authMethodConstraint0008)
 }
 
+// rebuildSQLiteCredentialStage0008 rebuilds the credential_stages table with the widened constraint for SQLite.
 func rebuildSQLiteCredentialStage0008(db *gorm.DB) error {
 	statements := []string{
 		`CREATE TABLE credential_stages__0008 (
@@ -153,6 +156,7 @@ func Validate0008(db *gorm.DB) error {
 	return nil
 }
 
+// credentialStageAuthMethodDefinition0008 retrieves the current CHECK constraint definition for authorization_method.
 func credentialStageAuthMethodDefinition0008(db *gorm.DB) (string, error) {
 	var definition string
 	switch strings.ToLower(db.Dialector.Name()) {

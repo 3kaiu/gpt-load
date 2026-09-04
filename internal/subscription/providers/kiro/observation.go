@@ -41,6 +41,7 @@ type AccountObservation struct {
 	IncompleteSources    []string
 }
 
+// NormalizeObservation normalizes raw Kiro observation data into structured format.
 func NormalizeObservation(email string, observation AccountObservation) ([]byte, error) {
 	result := providerobservation.Snapshot{
 		Plan:         kiroPlan(observation),
@@ -62,6 +63,7 @@ func NormalizeObservation(email string, observation AccountObservation) ([]byte,
 	return json.Marshal(result)
 }
 
+// kiroPlan maps Kiro plan name to normalized plan identifier.
 func kiroPlan(observation AccountObservation) providerobservation.PlanSummary {
 	if len(observation.Usage.Meters) == 0 {
 		return providerobservation.PlanSummary{}
@@ -73,6 +75,7 @@ func kiroPlan(observation AccountObservation) providerobservation.PlanSummary {
 	return providerobservation.PlanSummary{Name: "Free", Level: providerobservation.PlanLevelFree}
 }
 
+// kiroMeterWindow determines the quota scope for a given meter and window type.
 func kiroMeterWindow(index int, meter UsageMeter) (providerobservation.QuotaWindow, error) {
 	id := providerobservation.SafeID(meter.DisplayName)
 	if id == "" {
@@ -128,6 +131,7 @@ func kiroMeterWindow(index int, meter UsageMeter) (providerobservation.QuotaWind
 	return window, nil
 }
 
+// kiroResetAt computes the reset time for a Kiro quota window.
 func kiroResetAt(raw string) *int64 {
 	value := strings.TrimSpace(raw)
 	if value == "" {

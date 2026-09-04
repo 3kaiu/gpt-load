@@ -43,18 +43,22 @@ type Executor interface {
 
 type executor struct{ bridge cpaembedded.KiroHTTPExecutor }
 
+// NewExecutor creates a new Kiro executor.
 func NewExecutor() Executor { return &executor{bridge: cpaembedded.NewKiroHTTPExecutor()} }
 
+// Execute executes a Kiro API request synchronously.
 func (value *executor) Execute(ctx context.Context, credentialID string, credential Credential, request ExecuteRequest) (ExecuteResponse, error) {
 	response, err := value.bridge.ExecuteCanonical(ctx, credentialID, credentialToBridge(credential), requestToBridge(request))
 	return responseFromBridge(response), normalizeError(err)
 }
 
+// CountTokens returns a local token count estimate.
 func (value *executor) CountTokens(ctx context.Context, credentialID string, credential Credential, request ExecuteRequest) (ExecuteResponse, error) {
 	response, err := value.bridge.CountTokensCanonical(ctx, credentialID, credentialToBridge(credential), requestToBridge(request))
 	return responseFromBridge(response), normalizeError(err)
 }
 
+// ExecuteStream executes a Kiro API request and streams events.
 func (value *executor) ExecuteStream(ctx context.Context, credentialID string, credential Credential, request ExecuteRequest) (*ExecuteStreamResponse, error) {
 	response, err := value.bridge.ExecuteStreamCanonical(ctx, credentialID, credentialToBridge(credential), requestToBridge(request))
 	if response == nil {
@@ -78,6 +82,7 @@ func (value *executor) ExecuteStream(ctx context.Context, credentialID string, c
 	}, normalizeError(err)
 }
 
+// requestToBridge converts an internal request to a CPA bridge request.
 func requestToBridge(request ExecuteRequest) cpaembedded.ExecuteRequest {
 	return cpaembedded.ExecuteRequest{
 		AttemptID: request.AttemptID, Model: request.Model, Payload: append([]byte(nil), request.Payload...),
@@ -87,6 +92,7 @@ func requestToBridge(request ExecuteRequest) cpaembedded.ExecuteRequest {
 	}
 }
 
+// responseFromBridge converts a CPA bridge response to internal format.
 func responseFromBridge(response cpaembedded.ExecuteResponse) ExecuteResponse {
 	return ExecuteResponse{
 		Payload: append([]byte(nil), response.Payload...), Headers: response.Headers.Clone(),

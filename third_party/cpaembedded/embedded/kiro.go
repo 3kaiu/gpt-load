@@ -114,6 +114,7 @@ type KiroTokenEndpointError struct {
 	RetryAfter time.Duration
 }
 
+// (KiroTokenEndpointError).Error returns the error message.
 func (err *KiroTokenEndpointError) Error() string {
 	if err == nil {
 		return "Kiro token endpoint failed"
@@ -121,6 +122,7 @@ func (err *KiroTokenEndpointError) Error() string {
 	return fmt.Sprintf("Kiro token endpoint returned status %d", err.StatusCode)
 }
 
+// (KiroTokenEndpointError).HTTPStatusCode returns the HTTP status code.
 func (err *KiroTokenEndpointError) HTTPStatusCode() int {
 	if err == nil {
 		return 0
@@ -134,6 +136,7 @@ type KiroUpstreamHTTPError struct {
 	StatusCode int
 }
 
+// (KiroUpstreamHTTPError).Error returns the error message.
 func (err *KiroUpstreamHTTPError) Error() string {
 	if err == nil {
 		return "Kiro upstream request failed"
@@ -141,6 +144,7 @@ func (err *KiroUpstreamHTTPError) Error() string {
 	return fmt.Sprintf("Kiro %s endpoint returned status %d", err.Operation, err.StatusCode)
 }
 
+// (KiroUpstreamHTTPError).HTTPStatusCode returns the HTTP status code.
 func (err *KiroUpstreamHTTPError) HTTPStatusCode() int {
 	if err == nil {
 		return 0
@@ -186,6 +190,7 @@ func MarshalKiroCredential(credential KiroCredential) ([]byte, error) {
 	return json.Marshal(parsed)
 }
 
+// kiroCanonicalFields extracts canonical fields from a Kiro credential.
 func kiroCanonicalFields() map[string]struct{} {
 	return map[string]struct{}{
 		"type": {}, "auth_kind": {}, "access_token": {}, "refresh_token": {},
@@ -194,6 +199,7 @@ func kiroCanonicalFields() map[string]struct{} {
 	}
 }
 
+// normalizeKiroCredential normalizes a Kiro credential by setting defaults.
 func normalizeKiroCredential(credential *KiroCredential) {
 	credential.Type = strings.ToLower(strings.TrimSpace(credential.Type))
 	credential.AuthKind = strings.ToLower(strings.TrimSpace(credential.AuthKind))
@@ -218,10 +224,12 @@ func normalizeKiroCredential(credential *KiroCredential) {
 	}
 }
 
+// validateKiroCredential validates a Kiro credential.
 func validateKiroCredential(credential KiroCredential) error {
 	return validateKiroCredentialWithOptions(credential, KiroOptions{})
 }
 
+// validateKiroCredentialWithOptions validates a Kiro credential with additional options.
 func validateKiroCredentialWithOptions(credential KiroCredential, options KiroOptions) error {
 	if credential.Type != ProviderKiro {
 		return fmt.Errorf("credential type must be kiro")
@@ -277,6 +285,7 @@ func validateKiroCredentialWithOptions(credential KiroCredential, options KiroOp
 	return nil
 }
 
+// validateKiroRegion validates a Kiro region string.
 func validateKiroRegion(region string) (string, error) {
 	region = strings.TrimSpace(region)
 	if region == "" {
@@ -299,6 +308,7 @@ func validateKiroRegion(region string) (string, error) {
 	return region, nil
 }
 
+// kiroCredentialRegion extracts the region from a Kiro credential.
 func kiroCredentialRegion(options KiroOptions) (string, bool) {
 	region, err := validateKiroRegion(options.Region)
 	return region, err == nil
@@ -364,6 +374,7 @@ func KiroAuthURL(region string) (string, error) {
 	return "https://prod." + region + ".auth.desktop.kiro.dev/", nil
 }
 
+// decodeKiroDeviceState decodes Kiro device state from base64.
 func decodeKiroDeviceState(raw []byte) (KiroDeviceState, error) {
 	var state KiroDeviceState
 	decoder := json.NewDecoder(bytes.NewReader(raw))

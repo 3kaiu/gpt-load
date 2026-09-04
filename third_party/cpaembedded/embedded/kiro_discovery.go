@@ -119,7 +119,7 @@ func resolveKiroProfileArn() string {
 	return ""
 }
 
-// kiroHomeCandidatePaths returns the likely Kiro token-cache locations for the
+// kiroTokenCachePaths returns the likely Kiro token-cache locations for the
 // current platform. The token lives in the shared AWS credential cache, so it
 // is keyed by the user home directory rather than a Kiro-specific folder.
 func kiroTokenCachePaths() []string {
@@ -193,6 +193,7 @@ func DiscoverKiroCredential() (KiroCredential, error) {
 	return credential, nil
 }
 
+// readKiroTokenCache reads the Kiro desktop token cache.
 func readKiroTokenCache() (KiroCredential, bool, error) {
 	for _, path := range kiroTokenCachePaths() {
 		raw, err := os.ReadFile(path)
@@ -277,6 +278,7 @@ type kiroUsageBreakJSON struct {
 	HasUsageLimit     bool    `json:"hasUsageLimit"`
 }
 
+// readKiroUsageState reads the Kiro desktop usage state.
 func readKiroUsageState() (*KiroUsageDiscovery, error) {
 	usageJSON, ok := readKiroVSCDBValue("kiro.kiroAgent")
 	if !ok {
@@ -328,6 +330,7 @@ func readKiroVSCDBValue(key string) ([]byte, bool) {
 	return nil, false
 }
 
+// firstNonEmpty returns the first non-empty string from the candidates.
 func firstNonEmpty(values ...string) string {
 	for _, value := range values {
 		if strings.TrimSpace(value) != "" {

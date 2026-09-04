@@ -311,6 +311,7 @@ func RefreshKiroCredentialOnce(ctx context.Context, current KiroCredential, opti
 	return refreshKiroCredentialOnce(ctx, current, options)
 }
 
+// refreshKiroCredentialOnce refreshes a Kiro credential using the stored or default endpoint.
 func refreshKiroCredentialOnce(ctx context.Context, current KiroCredential, options KiroOptions) (KiroCredential, error) {
 	if strings.TrimSpace(current.RefreshToken) == "" {
 		return KiroCredential{}, fmt.Errorf("Kiro refresh token is required")

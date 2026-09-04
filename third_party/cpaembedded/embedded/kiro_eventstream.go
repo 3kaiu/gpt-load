@@ -264,6 +264,7 @@ func (acc *kiroToolUseAccumulator) flush() (kiroEvent, bool) {
 	return event, true
 }
 
+// asKiroString extracts a JSON string from the raw message.
 func asKiroString(raw json.RawMessage) string {
 	if len(raw) == 0 {
 		return ""
@@ -275,6 +276,7 @@ func asKiroString(raw json.RawMessage) string {
 	return value
 }
 
+// asKiroBool extracts a JSON boolean from the raw message.
 func asKiroBool(raw json.RawMessage) bool {
 	var b bool
 	if err := json.Unmarshal(raw, &b); err != nil {

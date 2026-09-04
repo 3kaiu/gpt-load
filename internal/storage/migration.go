@@ -25,6 +25,7 @@ type schemaMigration struct {
 	ID string `gorm:"column:id;type:varchar(255);primaryKey;not null"`
 }
 
+// TableName returns the database table name for schema migrations.
 func (schemaMigration) TableName() string {
 	return migrationLedgerTable
 }
@@ -89,10 +90,12 @@ var migrations = []migration{
 	},
 }
 
+// applyMigrations applies pending migrations to a database.
 func applyMigrations(db *gorm.DB) error {
 	return applyMigrationRegistry(db, migrations)
 }
 
+// applyMigrationRegistry applies migrations in order from a registry.
 func applyMigrationRegistry(db *gorm.DB, entries []migration) error {
 	if db == nil {
 		return fmt.Errorf("apply migrations: db is nil")
@@ -135,6 +138,7 @@ func applyMigrationRegistry(db *gorm.DB, entries []migration) error {
 	}
 }
 
+// validateMigrationRegistry validates that a migration registry is ordered and has no duplicates.
 func validateMigrationRegistry(entries []migration) error {
 	for index, entry := range entries {
 		position := index + 1
@@ -157,6 +161,7 @@ func validateMigrationRegistry(entries []migration) error {
 	return nil
 }
 
+// applyMigrationsLocked applies migrations within a database-level lock.
 func applyMigrationsLocked(db *gorm.DB, entries []migration, useMigrationTransactions bool) error {
 	hadMigrationLedger := db.Migrator().HasTable(migrationLedgerTable)
 	if !hadMigrationLedger {
@@ -205,6 +210,7 @@ func applyMigrationsLocked(db *gorm.DB, entries []migration, useMigrationTransac
 	return validateMigrationForeignKeys(db)
 }
 
+// applyMigration applies a single migration with recovery support.
 func applyMigration(db *gorm.DB, entry migration, useMigrationTransactions bool) error {
 	if strings.EqualFold(db.Dialector.Name(), "mysql") {
 		return applyMySQLMigration(db, entry)

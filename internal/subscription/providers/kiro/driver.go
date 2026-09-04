@@ -15,8 +15,10 @@ import (
 
 type kiroDriver struct{}
 
+// newKiroDriver creates a new Kiro driver.
 func newKiroDriver() *kiroDriver { return &kiroDriver{} }
 
+// Implementations returns all Kiro subscription driver implementations.
 func Implementations() subscriptionruntime.Implementations {
 	driver := newKiroDriver()
 	return subscriptionruntime.Implementations{
@@ -26,8 +28,10 @@ func Implementations() subscriptionruntime.Implementations {
 	}
 }
 
+// ID returns the Kiro driver identifier.
 func (*kiroDriver) ID() spec.SubscriptionDriverID { return modules.KiroSubscriptionDriver }
 
+// Parse parses a Kiro credential from raw JSON.
 func (*kiroDriver) Parse(raw []byte) (subscriptionruntime.Credential, error) {
 	value, err := ParseCredentialJSON(raw)
 	if err != nil {
@@ -40,6 +44,7 @@ func (*kiroDriver) Parse(raw []byte) (subscriptionruntime.Credential, error) {
 	return kiroRuntimeCredential(value, canonical), nil
 }
 
+// Refresh refreshes a Kiro credential.
 func (d *kiroDriver) Refresh(ctx context.Context, current subscriptionruntime.Credential) (subscriptionruntime.Credential, error) {
 	// A self-discovered Kiro account is an AWS SSO / IdC bearer whose token the
 	// Kiro desktop app owns and keeps fresh in its token cache. Kiro's social
@@ -70,6 +75,7 @@ func (d *kiroDriver) Refresh(ctx context.Context, current subscriptionruntime.Cr
 	return kiroRuntimeCredential(refreshed, canonical), nil
 }
 
+// ClassifyRefreshFailure classifies a Kiro refresh failure.
 func (*kiroDriver) ClassifyRefreshFailure(err error) subscriptionruntime.RefreshFailureDecision {
 	if errors.Is(err, ErrCredentialIdentityChanged) {
 		return subscriptionruntime.RefreshFailureDecision{Kind: subscriptionruntime.RefreshFailureIdentityChanged}
@@ -90,6 +96,7 @@ func (*kiroDriver) ClassifyRefreshFailure(err error) subscriptionruntime.Refresh
 	return subscriptionruntime.RefreshFailureDecision{Kind: subscriptionruntime.RefreshFailureOutcomeUnknown}
 }
 
+// BeginDeviceAuthorization starts Kiro device authorization flow.
 func (*kiroDriver) BeginDeviceAuthorization(ctx context.Context) (subscriptionruntime.DeviceAuthorization, error) {
 	value, err := BeginDeviceAuthorization(ctx)
 	if err != nil {
@@ -105,6 +112,7 @@ func (*kiroDriver) BeginDeviceAuthorization(ctx context.Context) (subscriptionru
 	}, nil
 }
 
+// PollDeviceAuthorization polls for Kiro device authorization completion.
 func (*kiroDriver) PollDeviceAuthorization(ctx context.Context, raw []byte) (subscriptionruntime.DeviceAuthorizationPoll, error) {
 	state, err := unmarshalDeviceState(raw)
 	if err != nil {
@@ -136,6 +144,7 @@ func (*kiroDriver) PollDeviceAuthorization(ctx context.Context, raw []byte) (sub
 	return result, err
 }
 
+// ImportCredential imports a Kiro credential from external source.
 func (*kiroDriver) ImportCredential(ctx context.Context, raw []byte) (subscriptionruntime.Credential, error) {
 	value, err := ImportCredential(ctx, raw)
 	if err != nil {
@@ -148,6 +157,7 @@ func (*kiroDriver) ImportCredential(ctx context.Context, raw []byte) (subscripti
 	return kiroRuntimeCredential(value, canonical), nil
 }
 
+// DiscoverLocalCredential discovers a locally logged-in Kiro account.
 func (*kiroDriver) DiscoverLocalCredential(ctx context.Context) (subscriptionruntime.Credential, bool, error) {
 	value, found, err := DiscoverLocalCredential(ctx)
 	if err != nil || !found {
@@ -162,8 +172,10 @@ func (*kiroDriver) DiscoverLocalCredential(ctx context.Context) (subscriptionrun
 
 type kiroModelDiscovery struct{ *kiroDriver }
 
+// ID returns the Kiro model discovery identifier.
 func (kiroModelDiscovery) ID() spec.UtilityID { return modules.KiroModelDiscovery }
 
+// DiscoverModels discovers available Kiro models.
 func (*kiroDriver) DiscoverModels(ctx context.Context, credential subscriptionruntime.Credential) ([]string, error) {
 	value, err := ParseCredentialJSON(credential.Canonical())
 	if err != nil {
@@ -187,6 +199,7 @@ func (*kiroDriver) DiscoverModels(ctx context.Context, credential subscriptionru
 	return cpaembedded.MergeModelCatalog(cpaembedded.ProviderKiro, models), nil
 }
 
+// Observe observes Kiro account quota and usage.
 func (*kiroDriver) Observe(ctx context.Context, credential subscriptionruntime.Credential) (subscriptionruntime.Observation, error) {
 	value, err := ParseCredentialJSON(credential.Canonical())
 	if err != nil {
@@ -219,6 +232,7 @@ func (*kiroDriver) Observe(ctx context.Context, credential subscriptionruntime.C
 	}, nil
 }
 
+// kiroObservedQuotaScopes returns the quota scopes to observe for Kiro.
 func kiroObservedQuotaScopes(observed AccountObservation) []string {
 	scopes := make([]string, 0, 2)
 	if observed.AccountQuotaObserved {
@@ -232,8 +246,10 @@ func kiroObservedQuotaScopes(observed AccountObservation) []string {
 
 type kiroQuotaObservation struct{ *kiroDriver }
 
+// ID returns the Kiro quota observation identifier.
 func (kiroQuotaObservation) ID() spec.UtilityID { return modules.KiroQuotaObservation }
 
+// kiroRuntimeCredential converts a Kiro credential to runtime format.
 func kiroRuntimeCredential(value Credential, canonical []byte) subscriptionruntime.Credential {
 	expiresAt, expires := CredentialExpiresAt(value)
 	account := subscriptionruntime.Account{

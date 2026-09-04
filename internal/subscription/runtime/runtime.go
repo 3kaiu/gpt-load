@@ -35,6 +35,7 @@ type Account struct {
 	LastRefreshKnown bool
 }
 
+// NewCredential creates a new runtime credential from a driver credential.
 func NewCredential(canonical []byte, identity string, account Account, expiresAt time.Time, expires bool, secrets []string) Credential {
 	return Credential{
 		canonical: append([]byte(nil), canonical...), identity: identity, account: account,
@@ -100,6 +101,7 @@ func TokenEndpointFailureRetryable(statusCode int, oauthCode string) bool {
 		statusCode >= http.StatusInternalServerError && statusCode <= 599
 }
 
+// String returns the string representation of a refresh failure.
 func (failure RefreshFailure) String() string {
 	switch failure {
 	case RefreshFailureRetryable:
@@ -270,6 +272,7 @@ type UpstreamHTTPError struct {
 	StatusCode int
 }
 
+// Error returns the error message.
 func (err *UpstreamHTTPError) Error() string {
 	return fmt.Sprintf("subscription upstream returned status %d", err.StatusCode)
 }
@@ -317,6 +320,7 @@ func NewRuntime(channels *channel.Registry, registrations ...Implementations) (*
 	)
 }
 
+// compileRuntime compiles a runtime from driver implementations.
 func compileRuntime(
 	channels *channel.Registry,
 	drivers []Driver,
@@ -438,6 +442,7 @@ func compileRuntime(
 	return result, nil
 }
 
+// validateLocalCallbackSpec validates that a local callback spec matches the expected signature.
 func validateLocalCallbackSpec(spec LocalCallbackSpec) (LocalCallbackSpec, error) {
 	raw := strings.TrimSpace(spec.RedirectURI)
 	parsed, err := url.Parse(raw)
@@ -458,6 +463,7 @@ func validateLocalCallbackSpec(spec LocalCallbackSpec) (LocalCallbackSpec, error
 	return LocalCallbackSpec{RedirectURI: canonical}, nil
 }
 
+// indexImplementations indexes implementations by their identifiers.
 func indexImplementations[T any](values []T, id func(T) spec.ExtensionID) (map[spec.ExtensionID]T, error) {
 	result := make(map[spec.ExtensionID]T, len(values))
 	for _, value := range values {
@@ -546,6 +552,7 @@ func (runtime *Runtime) ImportCredential(
 	return driver.Parse(raw)
 }
 
+// ModelDiscovery returns the model discovery implementation.
 func (runtime *Runtime) ModelDiscovery(channelID channel.ID) (ModelDiscovery, bool) {
 	if runtime == nil {
 		return nil, false
@@ -554,6 +561,7 @@ func (runtime *Runtime) ModelDiscovery(channelID channel.ID) (ModelDiscovery, bo
 	return value.discovery, ok && value.discovery != nil
 }
 
+// QuotaObservation returns the quota observation implementation.
 func (runtime *Runtime) QuotaObservation(channelID channel.ID) (QuotaObservation, bool) {
 	if runtime == nil {
 		return nil, false
@@ -562,6 +570,7 @@ func (runtime *Runtime) QuotaObservation(channelID channel.ID) (QuotaObservation
 	return value.observation, ok && value.observation != nil
 }
 
+// ResetCreditAction returns the reset credit action implementation.
 func (runtime *Runtime) ResetCreditAction(channelID channel.ID) (ResetCreditAction, bool) {
 	if runtime == nil {
 		return nil, false

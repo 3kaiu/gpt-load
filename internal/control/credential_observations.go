@@ -117,6 +117,7 @@ type observationFlightKey struct {
 	credentialID uint
 }
 
+// RefreshCredentialObservation refreshes a credential's observation data.
 func (s *Service) RefreshCredentialObservation(
 	ctx context.Context,
 	groupID uint,
@@ -125,6 +126,7 @@ func (s *Service) RefreshCredentialObservation(
 	return s.refreshCredentialObservation(ctx, groupID, credentialID, observationRefreshManual)
 }
 
+// refreshCredentialObservation refreshes credential observation with retry logic.
 func (s *Service) refreshCredentialObservation(
 	ctx context.Context,
 	groupID uint,
@@ -168,6 +170,7 @@ func (s *Service) refreshCredentialObservation(
 	}
 }
 
+// credentialObservationRefreshInFlight checks if a refresh is already in progress.
 func (s *Service) credentialObservationRefreshInFlight(groupID, credentialID uint) bool {
 	if s == nil || groupID == 0 || credentialID == 0 {
 		return false
@@ -179,6 +182,7 @@ func (s *Service) credentialObservationRefreshInFlight(groupID, credentialID uin
 	}] != nil
 }
 
+// refreshCredentialObservationOnce refreshes credential observation once without retry.
 func (s *Service) refreshCredentialObservationOnce(
 	ctx context.Context,
 	groupID uint,
@@ -350,6 +354,7 @@ func (s *Service) refreshCredentialObservationOnce(
 	return response, nil
 }
 
+// mergeObservationPlanSummary merges two plan summary maps.
 func mergeObservationPlanSummary(previous, current ObservationPlanSummary) ObservationPlanSummary {
 	if current.Name == "" {
 		return previous
@@ -357,6 +362,7 @@ func mergeObservationPlanSummary(previous, current ObservationPlanSummary) Obser
 	return current
 }
 
+// mergeObservationAccountSummary merges two account summary maps.
 func mergeObservationAccountSummary(
 	previous *ObservationAccountSummary,
 	current *ObservationAccountSummary,
@@ -396,6 +402,7 @@ func mergeObservationAccountSummary(
 	return &merged
 }
 
+// mergeObservationQuotaWindows merges two quota window maps.
 func mergeObservationQuotaWindows(
 	previous []ObservationQuotaWindow,
 	current []ObservationQuotaWindow,
@@ -440,6 +447,7 @@ func mergeObservationQuotaWindows(
 	return merged, preservedPrevious
 }
 
+// subscriptionUpstreamHTTPStatus extracts HTTP status from subscription upstream error.
 func subscriptionUpstreamHTTPStatus(err error) int {
 	var upstream *subscriptionruntime.UpstreamHTTPError
 	if errors.As(err, &upstream) && upstream != nil {
@@ -448,6 +456,7 @@ func subscriptionUpstreamHTTPStatus(err error) int {
 	return 0
 }
 
+// recordCredentialObservationFailure records a credential observation failure.
 func (s *Service) recordCredentialObservationFailure(
 	ctx context.Context,
 	credential models.Credential,
@@ -498,6 +507,7 @@ func (s *Service) recordCredentialObservationFailure(
 	return response, fmt.Errorf("%s: %w", summary, app_errors.ErrBadGateway)
 }
 
+// GetCredentialObservation returns observation data for a credential.
 func (s *Service) GetCredentialObservation(ctx context.Context, groupID, credentialID uint) (CredentialObservationResponse, error) {
 	_, credential, row, err := s.loadObservationTarget(ctx, groupID, credentialID)
 	if err != nil {
@@ -508,6 +518,7 @@ func (s *Service) GetCredentialObservation(ctx context.Context, groupID, credent
 	return response, nil
 }
 
+// GetCredentialDetail returns detailed observation data for a credential.
 func (s *Service) GetCredentialDetail(ctx context.Context, groupID, credentialID uint) (CredentialDetailResponse, error) {
 	item, err := s.loadCredentialItem(ctx, groupID, credentialID)
 	if err != nil {
@@ -519,6 +530,7 @@ func (s *Service) GetCredentialDetail(ctx context.Context, groupID, credentialID
 	return CredentialDetailResponse{Credential: item, Observation: observation}, nil
 }
 
+// loadObservationTarget loads the observation target for a credential.
 func (s *Service) loadObservationTarget(ctx context.Context, groupID, credentialID uint) (models.Group, models.Credential, models.CredentialObservation, error) {
 	var group models.Group
 	var credential models.Credential
@@ -555,6 +567,7 @@ func (s *Service) loadObservationTarget(ctx context.Context, groupID, credential
 	return group, credential, observation, nil
 }
 
+// upsertCredentialObservation inserts or updates credential observation data.
 func (s *Service) upsertCredentialObservation(ctx context.Context, row models.CredentialObservation) error {
 	return s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		var existing models.CredentialObservation
@@ -593,6 +606,7 @@ func (s *Service) upsertCredentialObservationMetadataOnly(
 	})
 }
 
+// restoreCredentialQuotaObservations restores quota observations from the database.
 func (s *Service) restoreCredentialQuotaObservations(ctx context.Context) error {
 	var observations []models.CredentialObservation
 	if err := s.db.WithContext(ctx).Find(&observations).Error; err != nil {
@@ -626,6 +640,7 @@ func (s *Service) restoreCredentialQuotaObservations(ctx context.Context) error 
 	return nil
 }
 
+// mapCredentialObservation maps raw observation data to API response format.
 func mapCredentialObservation(row models.CredentialObservation) CredentialObservationResponse {
 	response := CredentialObservationResponse{
 		State: string(row.State), ObservationVersion: row.ObservationVersion,
@@ -641,6 +656,7 @@ func mapCredentialObservation(row models.CredentialObservation) CredentialObserv
 	return response
 }
 
+// presentCredentialObservation presents observation data for API response.
 func presentCredentialObservation(row models.CredentialObservation, identityFingerprint string) *CredentialObservationResponse {
 	if row.CredentialID == 0 || row.IdentityFingerprint != identityFingerprint {
 		unavailable := CredentialObservationResponse{State: string(models.CredentialObservationUnavailable)}
@@ -650,6 +666,7 @@ func presentCredentialObservation(row models.CredentialObservation, identityFing
 	return &response
 }
 
+// observationResponseValue computes the response value for an observation metric.
 func observationResponseValue(value *CredentialObservationResponse) CredentialObservationResponse {
 	if value != nil {
 		return *value
@@ -657,6 +674,7 @@ func observationResponseValue(value *CredentialObservationResponse) CredentialOb
 	return CredentialObservationResponse{State: string(models.CredentialObservationUnavailable)}
 }
 
+// applyCredentialQuotaObservation applies quota observation data to a credential.
 func (s *Service) applyCredentialQuotaObservation(
 	credentialID uint,
 	response *CredentialObservationResponse,
@@ -692,6 +710,7 @@ func providerQuotaWindows(windows []ObservationQuotaWindow) []providerobservatio
 // credentialDailyUsageWindow 是账号卡上「近 24 小时成功/失败」的窗口长度。
 const credentialDailyUsageWindow = 24 * time.Hour
 
+// enrichCredentialActivities enriches credential data with activity summaries.
 func (s *Service) enrichCredentialActivities(
 	ctx context.Context,
 	items []CredentialItemResponse,
@@ -741,6 +760,7 @@ func (s *Service) enrichCredentialActivities(
 	}
 }
 
+// enrichCredentialDailyUsage enriches credential data with daily usage.
 func (s *Service) enrichCredentialDailyUsage(
 	ctx context.Context,
 	credentialID uint,
@@ -755,6 +775,7 @@ func (s *Service) enrichCredentialDailyUsage(
 	*item = items[0]
 }
 
+// enrichCredentialObservationUsage enriches credential data with observation-based usage.
 func (s *Service) enrichCredentialObservationUsage(
 	ctx context.Context,
 	credentialID uint,
@@ -799,6 +820,7 @@ func (s *Service) enrichCredentialObservationUsage(
 	}
 }
 
+// mapObservationWindowUsage maps observation window data to usage format.
 func mapObservationWindowUsage(
 	fromMS int64,
 	toMS int64,

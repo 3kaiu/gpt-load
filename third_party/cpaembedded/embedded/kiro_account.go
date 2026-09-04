@@ -90,6 +90,7 @@ func ObserveKiroAccount(ctx context.Context, credential KiroCredential, options 
 	return observation, nil
 }
 
+// hasKiroCreditMeter checks if the Kiro usage state has a credit meter entry.
 func hasKiroCreditMeter(meters []KiroUsageMeter) bool {
 	for _, meter := range meters {
 		kind := strings.ToLower(strings.TrimSpace(meter.Unit))

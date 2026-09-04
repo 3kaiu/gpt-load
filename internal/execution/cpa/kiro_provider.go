@@ -18,19 +18,25 @@ import (
 
 type kiroProviderCredential struct{ value kiro.Credential }
 
+// redactionValues returns redaction values for Kiro credentials.
 func (credential kiroProviderCredential) redactionValues() []string {
 	return credential.value.SecretValues()
 }
 
 type kiroProviderBridge struct{ executor kiro.Executor }
 
+// newKiroProviderBridge creates a new Kiro provider bridge.
 func newKiroProviderBridge() *kiroProviderBridge {
 	return &kiroProviderBridge{executor: kiro.NewExecutor()}
 }
 
-func (*kiroProviderBridge) ProviderKind() channel.ProviderKind  { return channel.ProviderKiro }
+// ProviderKind returns the Kiro provider kind.
+func (*kiroProviderBridge) ProviderKind() channel.ProviderKind { return channel.ProviderKiro }
+
+// UpstreamProtocol returns the upstream protocol identifier.
 func (*kiroProviderBridge) UpstreamProtocol() protocol.Protocol { return protocol.Anthropic }
 
+// ValidateRouteCapability validates a route capability for Kiro.
 func (*kiroProviderBridge) ValidateRouteCapability(route channel.RouteDescriptor) error {
 	if route.ClientProtocol != protocol.Anthropic {
 		return fmt.Errorf("route is not supported by Kiro")
@@ -43,6 +49,7 @@ func (*kiroProviderBridge) ValidateRouteCapability(route channel.RouteDescriptor
 	return nil
 }
 
+// ParseCredential parses a Kiro credential from raw JSON.
 func (*kiroProviderBridge) ParseCredential(raw []byte) (providerCredential, error) {
 	credential, err := kiro.ParseCredentialJSON(raw)
 	if err != nil {
@@ -51,6 +58,7 @@ func (*kiroProviderBridge) ParseCredential(raw []byte) (providerCredential, erro
 	return kiroProviderCredential{value: credential}, nil
 }
 
+// Execute executes a Kiro API request.
 func (bridge *kiroProviderBridge) Execute(
 	ctx context.Context,
 	credentialID string,
@@ -68,6 +76,7 @@ func (bridge *kiroProviderBridge) Execute(
 	}, err
 }
 
+// ExecuteStream executes a Kiro API request and streams events.
 func (bridge *kiroProviderBridge) ExecuteStream(
 	ctx context.Context,
 	credentialID string,
@@ -105,6 +114,7 @@ func (bridge *kiroProviderBridge) ExecuteStream(
 	}, nil
 }
 
+// ValidateLocalTokenCount validates if local token counting is supported.
 func (bridge *kiroProviderBridge) ValidateLocalTokenCount(request providerRequest) error {
 	if !kiroLocalTokenCountModelSupported(request.Model) {
 		return errors.New("Kiro local token count tokenizer is unavailable for model")
@@ -121,10 +131,12 @@ func (bridge *kiroProviderBridge) ValidateLocalTokenCount(request providerReques
 	}
 }
 
+// kiroLocalTokenCountModelSupported checks if a model supports local token counting.
 func kiroLocalTokenCountModelSupported(model string) bool {
 	return strings.HasPrefix(strings.ToLower(strings.TrimSpace(model)), "claude-")
 }
 
+// CountTokensLocal returns a local token count estimate.
 func (bridge *kiroProviderBridge) CountTokensLocal(
 	_ context.Context,
 	request providerRequest,
@@ -139,6 +151,7 @@ func (bridge *kiroProviderBridge) CountTokensLocal(
 	}, nil
 }
 
+// kiroRequest extracts a Kiro request from the CPA adapter request.
 func kiroRequest(request providerRequest, credentialID string) kiro.ExecuteRequest {
 	return kiro.ExecuteRequest{
 		AttemptID: request.AttemptID, Model: request.Model,
@@ -149,6 +162,7 @@ func kiroRequest(request providerRequest, credentialID string) kiro.ExecuteReque
 	}
 }
 
+// kiroContinuityScope determines the continuity scope for a Kiro request.
 func kiroContinuityScope(base, credentialID, model, attemptID string) string {
 	base = strings.TrimSpace(base)
 	credentialID = strings.TrimSpace(credentialID)
@@ -166,6 +180,7 @@ func kiroContinuityScope(base, credentialID, model, attemptID string) string {
 	return strings.Join([]string{"gpt-load-kiro", base, credentialID, model}, "\x00")
 }
 
+// ClassifyError classifies a Kiro error into an upstream error.
 func (*kiroProviderBridge) ClassifyError(
 	ctx context.Context,
 	err error,
@@ -225,6 +240,7 @@ func (*kiroProviderBridge) ClassifyError(
 	return status, evidence
 }
 
+// kiroProviderErrorSummary produces a safe error summary for Kiro upstream errors.
 func kiroProviderErrorSummary(status int, code string) string {
 	switch {
 	case status == http.StatusUnauthorized:

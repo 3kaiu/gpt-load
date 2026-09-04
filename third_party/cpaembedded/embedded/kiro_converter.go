@@ -9,6 +9,7 @@ import (
 	"strings"
 )
 
+// randInt63 generates a random int63 value.
 func randInt63() int64 {
 	var value [8]byte
 	if _, err := rand.Read(value[:]); err != nil {
@@ -382,14 +383,17 @@ func kiroConversationFromRequest(request kiroRequest) (kiroConversationState, st
 	return state, effort
 }
 
+// newKiroMessageID generates a random Kiro message ID.
 func newKiroMessageID() string {
 	return randomKiroID()
 }
 
+// randomKiroID generates a random hex ID for Kiro.
 func randomKiroID() string {
 	return fmt.Sprintf("msg_%s", randomHex(8))
 }
 
+// randomHex generates n random hex characters.
 func randomHex(n int) string {
 	const digits = "0123456789abcdef"
 	bytes := make([]byte, n)
@@ -399,6 +403,7 @@ func randomHex(n int) string {
 	return string(bytes)
 }
 
+// jsonToolResultInMessage checks if the content blocks contain a tool_result.
 func jsonToolResultInMessage(content json.RawMessage) bool {
 	var blocks []kiroAnthropicBlock
 	if err := json.Unmarshal(content, &blocks); err != nil {
@@ -412,6 +417,7 @@ func jsonToolResultInMessage(content json.RawMessage) bool {
 	return false
 }
 
+// extractKiroToolResults extracts tool results from Anthropic content blocks.
 func extractKiroToolResults(content json.RawMessage) []kiroToolResult {
 	var blocks []struct {
 		Type      string          `json:"type"`
@@ -439,6 +445,7 @@ func extractKiroToolResults(content json.RawMessage) []kiroToolResult {
 	return results
 }
 
+// buildKiroToolEntries converts Anthropic tool definitions to Kiro format.
 func buildKiroToolEntries(tools []json.RawMessage) []kiroToolEntry {
 	var entries []kiroToolEntry
 	for _, rawTool := range tools {
@@ -461,6 +468,7 @@ func buildKiroToolEntries(tools []json.RawMessage) []kiroToolEntry {
 	return entries
 }
 
+// parseKiroContentBlocks parses JSON content blocks from Anthropic messages.
 func parseKiroContentBlocks(content json.RawMessage) ([]kiroAnthropicBlock, error) {
 	var blocks []kiroAnthropicBlock
 	if err := json.Unmarshal(content, &blocks); err != nil {
@@ -474,6 +482,7 @@ func parseKiroContentBlocks(content json.RawMessage) ([]kiroAnthropicBlock, erro
 	return blocks, nil
 }
 
+// decodeKiroJSONValue decodes a JSON value into an interface.
 func decodeKiroJSONValue(raw json.RawMessage) any {
 	var value any
 	if err := json.Unmarshal(raw, &value); err != nil {

@@ -78,6 +78,7 @@ type TokenEndpointError struct {
 	RetryAfter time.Duration
 }
 
+// Error returns the error message.
 func (err *TokenEndpointError) Error() string {
 	if err == nil {
 		return "Kiro token endpoint failed"
@@ -85,6 +86,7 @@ func (err *TokenEndpointError) Error() string {
 	return fmt.Sprintf("Kiro token endpoint returned status %d", err.StatusCode)
 }
 
+// HTTPStatusCode returns the HTTP status code.
 func (err *TokenEndpointError) HTTPStatusCode() int {
 	if err == nil {
 		return 0
@@ -97,6 +99,7 @@ type UpstreamHTTPError struct {
 	StatusCode int
 }
 
+// Error returns the error message.
 func (err *UpstreamHTTPError) Error() string {
 	if err == nil {
 		return "Kiro upstream request failed"
@@ -104,6 +107,7 @@ func (err *UpstreamHTTPError) Error() string {
 	return fmt.Sprintf("Kiro %s endpoint returned status %d", err.Operation, err.StatusCode)
 }
 
+// HTTPStatusCode returns the HTTP status code.
 func (err *UpstreamHTTPError) HTTPStatusCode() int {
 	if err == nil {
 		return 0
@@ -111,6 +115,7 @@ func (err *UpstreamHTTPError) HTTPStatusCode() int {
 	return err.StatusCode
 }
 
+// ParseCredentialJSON parses a Kiro credential from JSON.
 func ParseCredentialJSON(raw []byte) (Credential, error) {
 	value, err := cpaembedded.ParseKiroCredentialJSON(raw)
 	if err != nil {
@@ -119,6 +124,7 @@ func ParseCredentialJSON(raw []byte) (Credential, error) {
 	return credentialFromBridge(value), nil
 }
 
+// MarshalCredential marshals a Kiro credential to JSON.
 func MarshalCredential(value Credential) ([]byte, error) {
 	raw, err := cpaembedded.MarshalKiroCredential(credentialToBridge(value))
 	if err != nil {
@@ -127,12 +133,15 @@ func MarshalCredential(value Credential) ([]byte, error) {
 	return raw, nil
 }
 
+// CredentialExpiresAt returns the expiration time of a Kiro credential.
 func CredentialExpiresAt(value Credential) (time.Time, bool) {
 	return cpaembedded.KiroCredentialExpiresAt(credentialToBridge(value))
 }
 
+// SecretValues returns the secret values for redaction.
 func (value Credential) SecretValues() []string { return credentialToBridge(value).SecretValues() }
 
+// BeginDeviceAuthorization starts the Kiro device authorization flow.
 func BeginDeviceAuthorization(ctx context.Context) (DeviceAuthorization, error) {
 	options, err := kiroOptions(ctx)
 	if err != nil {
@@ -148,6 +157,7 @@ func BeginDeviceAuthorization(ctx context.Context) (DeviceAuthorization, error) 
 	}, nil
 }
 
+// PollDeviceAuthorizationOnce polls once for Kiro device authorization completion.
 func PollDeviceAuthorizationOnce(ctx context.Context, state DeviceAuthorizationState) (DeviceAuthorizationPoll, error) {
 	options, err := kiroOptions(ctx)
 	if err != nil {
@@ -163,6 +173,7 @@ func PollDeviceAuthorizationOnce(ctx context.Context, state DeviceAuthorizationS
 	}, nil
 }
 
+// RefreshCredentialOnce refreshes a Kiro credential once.
 func RefreshCredentialOnce(ctx context.Context, current Credential) (Credential, error) {
 	options, err := kiroOptions(ctx)
 	if err != nil {
@@ -175,6 +186,7 @@ func RefreshCredentialOnce(ctx context.Context, current Credential) (Credential,
 	return credentialFromBridge(value), nil
 }
 
+// ImportCredential imports a Kiro credential from external format.
 func ImportCredential(ctx context.Context, raw []byte) (Credential, error) {
 	options, err := kiroOptions(ctx)
 	if err != nil {
@@ -199,6 +211,7 @@ func DiscoverLocalCredential(context.Context) (Credential, bool, error) {
 	return credentialFromBridge(value), true, nil
 }
 
+// ListModels lists available Kiro models.
 func ListModels(ctx context.Context, credential Credential) ([]string, error) {
 	options, err := kiroOptions(ctx)
 	if err != nil {
@@ -211,6 +224,7 @@ func ListModels(ctx context.Context, credential Credential) ([]string, error) {
 	return append([]string(nil), values...), nil
 }
 
+// ObserveAccount observes a Kiro account quota and usage.
 func ObserveAccount(ctx context.Context, credential Credential) (AccountObservation, error) {
 	options, err := kiroOptions(ctx)
 	if err != nil {
@@ -246,6 +260,7 @@ func CountTokensLocal(payload []byte) []byte {
 	return cpaembedded.CountKiroTokensLocal(payload)
 }
 
+// kiroOptions extracts Kiro-specific options from the credential.
 func kiroOptions(ctx context.Context) (cpaembedded.KiroOptions, error) {
 	client, err := subscriptionruntime.HTTPClient(ctx)
 	if err != nil {
@@ -254,6 +269,7 @@ func kiroOptions(ctx context.Context) (cpaembedded.KiroOptions, error) {
 	return cpaembedded.KiroOptions{HTTPClient: client}, nil
 }
 
+// IsDefinitiveRefreshRejection checks if a refresh error is a definitive rejection.
 func IsDefinitiveRefreshRejection(code string) bool {
 	switch strings.ToLower(strings.TrimSpace(code)) {
 	case "invalid_grant", "refresh_token_expired", "refresh_token_revoked", "access_denied":
@@ -263,6 +279,7 @@ func IsDefinitiveRefreshRejection(code string) bool {
 	}
 }
 
+// credentialFromBridge converts a CPA bridge credential to internal format.
 func credentialFromBridge(value cpaembedded.KiroCredential) Credential {
 	return Credential{
 		Type: value.Type, AuthKind: value.AuthKind, AccessToken: value.AccessToken,
@@ -273,6 +290,7 @@ func credentialFromBridge(value cpaembedded.KiroCredential) Credential {
 	}
 }
 
+// credentialToBridge converts an internal credential to CPA bridge format.
 func credentialToBridge(value Credential) cpaembedded.KiroCredential {
 	return cpaembedded.KiroCredential{
 		Type: value.Type, AuthKind: value.AuthKind, AccessToken: value.AccessToken,
@@ -283,6 +301,7 @@ func credentialToBridge(value Credential) cpaembedded.KiroCredential {
 	}
 }
 
+// stateFromBridge converts a CPA bridge device state to internal format.
 func stateFromBridge(value cpaembedded.KiroDeviceState) DeviceAuthorizationState {
 	return DeviceAuthorizationState{
 		DeviceCode: value.DeviceCode, TokenEndpoint: value.TokenEndpoint,
@@ -290,6 +309,7 @@ func stateFromBridge(value cpaembedded.KiroDeviceState) DeviceAuthorizationState
 	}
 }
 
+// stateToBridge converts an internal device state to CPA bridge format.
 func stateToBridge(value DeviceAuthorizationState) cpaembedded.KiroDeviceState {
 	return cpaembedded.KiroDeviceState{
 		DeviceCode: value.DeviceCode, TokenEndpoint: value.TokenEndpoint,
@@ -297,6 +317,7 @@ func stateToBridge(value DeviceAuthorizationState) cpaembedded.KiroDeviceState {
 	}
 }
 
+// normalizeError normalizes an error into a structured Kiro error type.
 func normalizeError(err error) error {
 	if err == nil {
 		return nil
@@ -327,8 +348,10 @@ func normalizeError(err error) error {
 	return err
 }
 
+// marshalDeviceState marshals Kiro device state to JSON.
 func marshalDeviceState(value DeviceAuthorizationState) ([]byte, error) { return json.Marshal(value) }
 
+// unmarshalDeviceState unmarshals Kiro device state from JSON.
 func unmarshalDeviceState(raw []byte) (DeviceAuthorizationState, error) {
 	var value DeviceAuthorizationState
 	decoder := json.NewDecoder(bytes.NewReader(raw))

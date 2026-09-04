@@ -31,6 +31,7 @@ type KiroExecutionError struct {
 	retryAfter time.Duration
 }
 
+// (KiroExecutionError).Error returns the error message.
 func (err *KiroExecutionError) Error() string {
 	if err == nil || strings.TrimSpace(err.summary) == "" {
 		return "Kiro upstream request failed"
@@ -38,6 +39,7 @@ func (err *KiroExecutionError) Error() string {
 	return err.summary
 }
 
+// (KiroExecutionError).StatusCode returns the HTTP status code.
 func (err *KiroExecutionError) StatusCode() int {
 	if err == nil {
 		return 0
@@ -45,6 +47,7 @@ func (err *KiroExecutionError) StatusCode() int {
 	return err.status
 }
 
+// (KiroExecutionError).ErrorCode returns the upstream error code.
 func (err *KiroExecutionError) ErrorCode() string {
 	if err == nil {
 		return ""
@@ -52,6 +55,7 @@ func (err *KiroExecutionError) ErrorCode() string {
 	return err.code
 }
 
+// (KiroExecutionError).RetryAfter returns the retry-after duration.
 func (err *KiroExecutionError) RetryAfter() *time.Duration {
 	if err == nil || err.retryAfter <= 0 {
 		return nil
@@ -77,6 +81,7 @@ func NewKiroHTTPExecutor() KiroHTTPExecutor {
 	return &kiroHTTPExecutor{baseURL: "", client: &http.Client{}}
 }
 
+// (kiroHTTPExecutor).endpoint returns the Kiro API endpoint URL.
 func (executor *kiroHTTPExecutor) endpoint(credential KiroCredential) (string, error) {
 	if strings.TrimSpace(executor.baseURL) != "" {
 		return strings.TrimRight(executor.baseURL, "/"), nil
@@ -88,6 +93,7 @@ func (executor *kiroHTTPExecutor) endpoint(credential KiroCredential) (string, e
 	return KiroRuntimeURL(region)
 }
 
+// (kiroHTTPExecutor).requestBody builds the request body for Kiro API calls.
 func (executor *kiroHTTPExecutor) requestBody(credential KiroCredential, request kiroRequest) ([]byte, error) {
 	payload, err := buildKiroPayload(request, credential.ProfileARN)
 	if err != nil {
@@ -104,7 +110,7 @@ func (executor *kiroHTTPExecutor) requestBody(credential KiroCredential, request
 	return payload, nil
 }
 
-// kiroRequestHeaders builds the amz-sdk headers Kiro expects.
+// (kiroHTTPExecutor).newRequest creates a new HTTP request with required Kiro headers.
 func (executor *kiroHTTPExecutor) newRequest(ctx context.Context, method, url string, body []byte) (*http.Request, error) {
 	req, err := http.NewRequestWithContext(ctx, method, url, bytes.NewReader(body))
 	if err != nil {
@@ -120,6 +126,7 @@ func (executor *kiroHTTPExecutor) newRequest(ctx context.Context, method, url st
 	return req, nil
 }
 
+// (kiroHTTPExecutor).ExecuteCanonical executes a Kiro request and returns an Anthropic-formatted response.
 func (executor *kiroHTTPExecutor) ExecuteCanonical(
 	ctx context.Context,
 	credentialID string,
@@ -237,6 +244,7 @@ func (executor *kiroHTTPExecutor) ExecuteCanonical(
 	return ExecuteResponse{Payload: raw, Headers: response.Header.Clone()}, nil
 }
 
+// (kiroHTTPExecutor).CountTokensCanonical returns a local token count estimate.
 func (executor *kiroHTTPExecutor) CountTokensCanonical(
 	ctx context.Context,
 	credentialID string,
@@ -281,6 +289,7 @@ func CountKiroTokensLocal(payload []byte) []byte {
 	return raw
 }
 
+// (kiroHTTPExecutor).ExecuteStreamCanonical executes a Kiro request and streams Anthropic-formatted events.
 func (executor *kiroHTTPExecutor) ExecuteStreamCanonical(
 	ctx context.Context,
 	credentialID string,
@@ -447,6 +456,7 @@ func emitKiroEventSSE(emit func([]byte) bool, index *int, thinkingIndex *int, ev
 	return false
 }
 
+// ktoSSE converts a Kiro event type string to SSE event type.
 func ktoSSE(eventType string, payload map[string]any) []byte {
 	raw, err := json.Marshal(payload)
 	if err != nil {
@@ -455,10 +465,12 @@ func ktoSSE(eventType string, payload map[string]any) []byte {
 	return []byte(fmt.Sprintf("event: %s\ndata: %s\n\n", eventType, raw))
 }
 
+// message_deltaSSE formats message_delta SSE data.
 func message_deltaSSE(payload map[string]any) []byte {
 	return ktoSSE("message_delta", payload)
 }
 
+// kiroAnthropicUsage converts Kiro usage metadata to Anthropic format.
 func kiroAnthropicUsage(event kiroEvent) map[string]any {
 	usage := map[string]any{
 		"input_tokens": event.InputTokens, "output_tokens": event.OutputTokens,
@@ -476,17 +488,20 @@ func (executor *kiroHTTPExecutor) setAuth(request *http.Request, credential Kiro
 	}
 }
 
+// isKiroClaudeFormat checks if a Kiro error response is Claude-compatible format.
 func isKiroClaudeFormat(format string) bool {
 	format = strings.ToLower(strings.TrimSpace(format))
 	return format == "" || format == "claude" || format == "anthropic"
 }
 
+// kiroHTTPErrorFromResponse creates an HTTP error from a Kiro response.
 func kiroHTTPErrorFromResponse(response *http.Response) error {
 	return &KiroExecutionError{
 		status: response.StatusCode, summary: fmt.Sprintf("Kiro upstream returned HTTP %d", response.StatusCode),
 	}
 }
 
+// kiroJSONEnvelopeError creates an error from a Kiro JSON envelope.
 func kiroJSONEnvelopeError(response *http.Response, body io.Reader) error {
 	raw, _ := io.ReadAll(io.LimitReader(body, kiroUpstreamBodyMax))
 	var envelope struct {
@@ -502,6 +517,7 @@ func kiroJSONEnvelopeError(response *http.Response, body io.Reader) error {
 	return &KiroExecutionError{status: response.StatusCode, code: code, summary: message}
 }
 
+// convertKiroDoError wraps a Go error as a Kiro execution error.
 func convertKiroDoError(err error) error {
 	var netErr interface{ Timeout() bool }
 	if errors.As(err, &netErr) {
@@ -518,6 +534,7 @@ func estimateKiroTokens(raw []byte) int {
 	return (len(raw) + 3) / 4
 }
 
+// randomKiroHex generates a random hex string for Kiro IDs.
 func randomKiroHex(n int) string {
 	return randomHex(n)
 }
