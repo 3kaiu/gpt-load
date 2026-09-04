@@ -8,6 +8,8 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -16,12 +18,20 @@ import (
 
 const (
 	kiroAMZTarget       = "AmazonCodeWhispererStreamingService.GenerateAssistantResponse"
+	kiroAMZTargetMCP    = "AmazonQDeveloperStreamingService.SendMessage"
 	kiroUserAgent       = "aws-sdk-rust/1.3.15 ua/2.1 api/codewhispererstreaming/0.1.17593 os/macos lang/rust/1.92.0 md/appVersion-2.10.0 app/AmazonQ-For-CLI"
 	kiroAMZUserAgent    = "aws-sdk-rust/1.3.15 ua/2.1 api/codewhispererstreaming/0.1.17593 os/macos lang/rust/1.92.0 m/F app/AmazonQ-For-CLI"
 	kiroCPAProvider     = "kiro"
 	kiroMaxAttempts     = 3
 	kiroBodyReadIdle    = 180 * time.Second
 	kiroUpstreamBodyMax = 4 * 1024 * 1024
+	// kiroEndpointRetries is the number of additional endpoint rotation attempts
+	// after the first 429.  Each attempt uses a different upstream endpoint with
+	// an independent rate-limit bucket, so the effective wait is 2-5s per
+	// attempt instead of the full 5-minute credit-consumption cooldown.
+	kiroEndpointRetries = 2
+	// kiroEndpointRetryBase is the base delay between endpoint rotation retries.
+	kiroEndpointRetryBase = 2 * time.Second
 )
 
 type KiroExecutionError struct {
@@ -74,11 +84,80 @@ type KiroHTTPExecutor interface {
 type kiroHTTPExecutor struct {
 	baseURL string
 	client  *http.Client
+	options KiroOptions
 }
 
 // NewKiroHTTPExecutor returns a Kiro executor using the production HTTP client.
 func NewKiroHTTPExecutor() KiroHTTPExecutor {
 	return &kiroHTTPExecutor{baseURL: "", client: &http.Client{}}
+}
+
+// NewKiroHTTPExecutorWithOptions returns a Kiro executor with explicit options
+// (e.g. a custom clock for testing or a token refresh lead time override).
+func NewKiroHTTPExecutorWithOptions(options KiroOptions) KiroHTTPExecutor {
+	return &kiroHTTPExecutor{baseURL: "", client: &http.Client{}, options: options}
+}
+
+// kiroTokenRefreshLeadTime is the duration before token expiry at which the
+// executor proactively refreshes the access token.  This prevents using a
+// token that is valid at Prepare() time but expires before the upstream call
+// completes (a common race with short-lived SSO access tokens).
+const kiroTokenRefreshLeadTime = 5 * time.Minute
+
+// refreshCredentialIfExpired checks the Kiro credential's expiry and, when
+// the access token is about to expire or already expired, uses the refresh
+// token to obtain a fresh pair.  The credential is returned (possibly
+// refreshed).  Errors are silently ignored — the caller will see the
+// upstream 401/403 and retry via the gateway's normal decision path.
+func (executor *kiroHTTPExecutor) refreshCredentialIfExpired(
+	ctx context.Context,
+	credential KiroCredential,
+) KiroCredential {
+	if KiroAuthKind(credential.AuthKind) != KiroAuthSocial {
+		return credential
+	}
+	refreshToken := strings.TrimSpace(credential.RefreshToken)
+	if refreshToken == "" {
+		return credential
+	}
+	if expiration, ok := KiroCredentialExpiresAt(credential); ok {
+		leadTime := kiroTokenRefreshLeadTime
+		if executor.options.TokenRefreshLeadTime > 0 {
+			leadTime = executor.options.TokenRefreshLeadTime
+		}
+		if expiration.After(kiroNow(executor.options).Add(leadTime)) {
+			return credential
+		}
+	}
+	refreshed, err := RefreshKiroCredentialOnce(ctx, credential, executor.options)
+	if err != nil {
+		return credential
+	}
+	return refreshed
+}
+
+// kiroEndpointVariant describes one upstream endpoint for request routing.
+// Different endpoints use independent rate-limit buckets; rotating between
+// them on 429 lets us retry in 2-5s instead of waiting the full 5-minute
+// credit-consumption cooldown.
+type kiroEndpointVariant struct {
+	host     string
+	amzTarget string // empty = no x-amz-target header
+}
+
+// kiroEndpointVariants returns the available API endpoint variants for the
+// given region.  The first entry is the default (runtime); the rest are
+// alternatives for rotation on 429.
+func kiroEndpointVariants(region string) []kiroEndpointVariant {
+	region = strings.ToLower(strings.TrimSpace(region))
+	if region == "" {
+		region = "us-east-1"
+	}
+	return []kiroEndpointVariant{
+		{host: "runtime." + region + ".kiro.dev"},
+		{host: "q." + region + ".amazonaws.com"},
+		{host: "codewhisperer." + region + ".amazonaws.com", amzTarget: kiroAMZTarget},
+	}
 }
 
 // (kiroHTTPExecutor).endpoint returns the Kiro API endpoint URL.
@@ -110,15 +189,25 @@ func (executor *kiroHTTPExecutor) requestBody(credential KiroCredential, request
 	return payload, nil
 }
 
-// (kiroHTTPExecutor).newRequest creates a new HTTP request with required Kiro headers.
+// (kiroHTTPExecutor).newRequest creates an HTTP request with the default
+// CodeWhisperer x-amz-target header.
 func (executor *kiroHTTPExecutor) newRequest(ctx context.Context, method, url string, body []byte) (*http.Request, error) {
+	return executor.newRequestWithTarget(ctx, method, url, body, kiroAMZTarget)
+}
+
+// (kiroHTTPExecutor).newRequestWithTarget creates an HTTP request with a
+// caller-specified x-amz-target header.  When amzTarget is empty the header
+// is omitted (used by the Ide and Runtime endpoints).
+func (executor *kiroHTTPExecutor) newRequestWithTarget(ctx context.Context, method, url string, body []byte, amzTarget string) (*http.Request, error) {
 	req, err := http.NewRequestWithContext(ctx, method, url, bytes.NewReader(body))
 	if err != nil {
 		return nil, err
 	}
 	req.Header.Set("Content-Type", "application/x-amz-json-1.0")
 	req.Header.Set("Accept", "*/*")
-	req.Header.Set("X-Amz-Target", kiroAMZTarget)
+	if amzTarget != "" {
+		req.Header.Set("X-Amz-Target", amzTarget)
+	}
 	req.Header.Set("User-Agent", kiroUserAgent)
 	req.Header.Set("x-amz-user-agent", kiroAMZUserAgent)
 	req.Header.Set("x-amzn-codewhisperer-optout", "false")
@@ -143,6 +232,7 @@ func (executor *kiroHTTPExecutor) ExecuteCanonical(
 	if !isKiroClaudeFormat(request.Format) {
 		return ExecuteResponse{}, fmt.Errorf("Kiro executor requires Anthropic format")
 	}
+	credential = executor.refreshCredentialIfExpired(ctx, credential)
 	parsed, err := parseKiroRequest(request.Payload)
 	if err != nil {
 		return ExecuteResponse{}, err
@@ -151,34 +241,63 @@ func (executor *kiroHTTPExecutor) ExecuteCanonical(
 	if err != nil {
 		return ExecuteResponse{}, err
 	}
-	endpoint, err := executor.endpoint(credential)
-	if err != nil {
-		return ExecuteResponse{}, err
+	if os.Getenv("KIRO_DEBUG_HTTP") != "" {
+		fmt.Fprintf(os.Stderr, "[kiro-debug] request payload bytes=%d input_chars=%d\n", len(body), len(request.Payload))
 	}
-	req, err := executor.newRequest(ctx, http.MethodPost, endpoint, body)
-	if err != nil {
-		return ExecuteResponse{}, err
+	// Endpoint rotation: on 429, try a different upstream endpoint (each has
+	// an independent rate-limit bucket) instead of waiting the full 5-minute
+	// credit-consumption cooldown.  The first attempt uses the default endpoint;
+	// subsequent retries rotate through alternatives with a short 2-5s backoff.
+	variants := kiroEndpointVariants(credential.Region)
+	if len(variants) == 0 {
+		variants = kiroEndpointVariants("")
 	}
-	executor.setAuth(req, credential)
-	response, err := executor.client.Do(req)
-	if err != nil {
-		return ExecuteResponse{}, convertKiroDoError(err)
-	}
-	defer func() { _ = response.Body.Close() }()
-	if response.StatusCode != http.StatusOK {
-		return ExecuteResponse{}, kiroHTTPErrorFromResponse(response)
-	}
-	if contentType := response.Header.Get("Content-Type"); !strings.Contains(contentType, "amazon.eventstream") {
-		return ExecuteResponse{}, kiroJSONEnvelopeError(response, response.Body)
-	}
-	var (
-		blocks      []map[string]any
-		usage       map[string]any
-		stopReason  = "stop_sequence"
-		thinking    []string
-		sig         string
-		upstreamErr error
-	)
+	lastErr := error(nil)
+	for attempt := 0; attempt <= kiroEndpointRetries; attempt++ {
+		variant := variants[attempt%len(variants)]
+		endpointURL := "https://" + variant.host + "/generateAssistantResponse"
+		req, err := executor.newRequestWithTarget(ctx, http.MethodPost, endpointURL, body, variant.amzTarget)
+		if err != nil {
+			return ExecuteResponse{}, err
+		}
+		executor.setAuth(req, credential)
+		response, err := executor.client.Do(req)
+		if err != nil {
+			return ExecuteResponse{}, convertKiroDoError(err)
+		}
+		if response.StatusCode == http.StatusTooManyRequests {
+			response.Body.Close()
+			if attempt < kiroEndpointRetries {
+				delay := kiroEndpointRetryBase + time.Duration(attempt)*time.Second
+				if os.Getenv("KIRO_DEBUG_HTTP") != "" {
+					fmt.Fprintf(os.Stderr, "[kiro-debug] 429 on endpoint %s, rotating (attempt %d/%d, delay %v)\n",
+						variant.host, attempt+1, kiroEndpointRetries, delay)
+				}
+				select {
+				case <-time.After(delay):
+				case <-ctx.Done():
+					return ExecuteResponse{}, ctx.Err()
+				}
+				lastErr = &KiroExecutionError{status: http.StatusTooManyRequests, summary: "Kiro upstream rate limit was reached"}
+				continue
+			}
+			return ExecuteResponse{}, kiroHTTPErrorFromResponse(response)
+		}
+		defer func() { _ = response.Body.Close() }()
+		if response.StatusCode != http.StatusOK {
+			return ExecuteResponse{}, kiroHTTPErrorFromResponse(response)
+		}
+		if contentType := response.Header.Get("Content-Type"); !strings.Contains(contentType, "amazon.eventstream") {
+			return ExecuteResponse{}, kiroJSONEnvelopeError(response, response.Body)
+		}
+		var (
+			blocks      []map[string]any
+			usage       map[string]any
+			stopReason  = "stop_sequence"
+			thinking    []string
+			sig         string
+			upstreamErr error
+		)
 	streamErr := parseKiroStream(response.Body, func(event kiroEvent) bool {
 		switch event.Type {
 		case kiroEventAssistantResponse:
@@ -241,7 +360,9 @@ func (executor *kiroHTTPExecutor) ExecuteCanonical(
 	if err != nil {
 		return ExecuteResponse{}, err
 	}
-	return ExecuteResponse{Payload: raw, Headers: response.Header.Clone()}, nil
+		return ExecuteResponse{Payload: raw, Headers: response.Header.Clone()}, nil
+	}
+	return ExecuteResponse{}, lastErr
 }
 
 // (kiroHTTPExecutor).CountTokensCanonical returns a local token count estimate.
@@ -306,6 +427,7 @@ func (executor *kiroHTTPExecutor) ExecuteStreamCanonical(
 	if !isKiroClaudeFormat(request.Format) {
 		return nil, fmt.Errorf("Kiro executor requires Anthropic format")
 	}
+	credential = executor.refreshCredentialIfExpired(ctx, credential)
 	parsed, err := parseKiroRequest(request.Payload)
 	if err != nil {
 		return nil, err
@@ -314,34 +436,58 @@ func (executor *kiroHTTPExecutor) ExecuteStreamCanonical(
 	if err != nil {
 		return nil, err
 	}
-	endpoint, err := executor.endpoint(credential)
-	if err != nil {
-		return nil, err
+	// Endpoint rotation on 429 (same logic as ExecuteCanonical).
+	variants := kiroEndpointVariants(credential.Region)
+	if len(variants) == 0 {
+		variants = kiroEndpointVariants("")
 	}
-	req, err := executor.newRequest(ctx, http.MethodPost, endpoint, body)
-	if err != nil {
-		return nil, err
+	lastErr := error(nil)
+	for attempt := 0; attempt <= kiroEndpointRetries; attempt++ {
+		variant := variants[attempt%len(variants)]
+		endpointURL := "https://" + variant.host + "/generateAssistantResponse"
+		req, err := executor.newRequestWithTarget(ctx, http.MethodPost, endpointURL, body, variant.amzTarget)
+		if err != nil {
+			return nil, err
+		}
+		executor.setAuth(req, credential)
+		response, err := executor.client.Do(req)
+		if err != nil {
+			return nil, convertKiroDoError(err)
+		}
+		if response.StatusCode == http.StatusTooManyRequests {
+			response.Body.Close()
+			if attempt < kiroEndpointRetries {
+				delay := kiroEndpointRetryBase + time.Duration(attempt)*time.Second
+				if os.Getenv("KIRO_DEBUG_HTTP") != "" {
+					fmt.Fprintf(os.Stderr, "[kiro-debug] 429 on endpoint %s, rotating (attempt %d/%d, delay %v)\n",
+						variant.host, attempt+1, kiroEndpointRetries, delay)
+				}
+				select {
+				case <-time.After(delay):
+				case <-ctx.Done():
+					return nil, ctx.Err()
+				}
+				continue
+			}
+			return nil, kiroHTTPErrorFromResponse(response)
+		}
+		if response.StatusCode != http.StatusOK {
+			defer func() { _ = response.Body.Close() }()
+			return nil, kiroHTTPErrorFromResponse(response)
+		}
+		if contentType := response.Header.Get("Content-Type"); !strings.Contains(contentType, "amazon.eventstream") {
+			defer func() { _ = response.Body.Close() }()
+			return nil, kiroJSONEnvelopeError(response, response.Body)
+		}
+		chunks := make(chan ExecuteStreamChunk)
+		go func() {
+			defer close(chunks)
+			_ = executor.emitKiroSSE(ctx, chunks, parsed.Model, response.Body)
+			_ = response.Body.Close()
+		}()
+		return &ExecuteStreamResponse{Headers: response.Header.Clone(), Chunks: chunks}, nil
 	}
-	executor.setAuth(req, credential)
-	response, err := executor.client.Do(req)
-	if err != nil {
-		return nil, convertKiroDoError(err)
-	}
-	if response.StatusCode != http.StatusOK {
-		defer func() { _ = response.Body.Close() }()
-		return nil, kiroHTTPErrorFromResponse(response)
-	}
-	if contentType := response.Header.Get("Content-Type"); !strings.Contains(contentType, "amazon.eventstream") {
-		defer func() { _ = response.Body.Close() }()
-		return nil, kiroJSONEnvelopeError(response, response.Body)
-	}
-	chunks := make(chan ExecuteStreamChunk)
-	go func() {
-		defer close(chunks)
-		_ = executor.emitKiroSSE(ctx, chunks, parsed.Model, response.Body)
-		_ = response.Body.Close()
-	}()
-	return &ExecuteStreamResponse{Headers: response.Header.Clone(), Chunks: chunks}, nil
+	return nil, lastErr
 }
 
 // emitKiroSSE consumes the Kiro event stream and writes Anthropic SSE chunks.
@@ -496,9 +642,80 @@ func isKiroClaudeFormat(format string) bool {
 
 // kiroHTTPErrorFromResponse creates an HTTP error from a Kiro response.
 func kiroHTTPErrorFromResponse(response *http.Response) error {
-	return &KiroExecutionError{
-		status: response.StatusCode, summary: fmt.Sprintf("Kiro upstream returned HTTP %d", response.StatusCode),
+	summary := fmt.Sprintf("Kiro upstream returned HTTP %d", response.StatusCode)
+	retryAfter := kiroRetryAfterFromHeader(response.Header)
+	body := ""
+	if response != nil && response.Body != nil {
+		raw, _ := io.ReadAll(io.LimitReader(response.Body, 8*1024))
+		body = string(raw)
+		// Kiro reports throttling retry windows in the JSON body
+		// (retryAfterMilliseconds), not always in the Retry-After header.
+		if fromBody := kiroRetryAfterFromBody(body); fromBody > retryAfter {
+			retryAfter = fromBody
+		}
 	}
+	// Parse the structured JSON body to extract a human-readable reason
+	// (e.g. CONTENT_LENGTH_EXCEEDS_THRESHOLD, CREDIT_CONSUMPTION_RATE_EXCEEDED).
+	// This gives the caller a meaningful error instead of a generic HTTP status.
+	code := ""
+	if body != "" {
+		var envelope struct {
+			Type   string `json:"__type"`
+			Reason string `json:"reason"`
+			Message string `json:"message"`
+		}
+		if err := json.Unmarshal([]byte(body), &envelope); err == nil {
+			code = strings.TrimPrefix(envelope.Type, "com.amazon.coral.service#")
+			if strings.TrimSpace(envelope.Reason) != "" {
+				summary = fmt.Sprintf("Kiro upstream rejected request: %s (HTTP %d)", envelope.Reason, response.StatusCode)
+			} else if strings.TrimSpace(envelope.Message) != "" {
+				summary = envelope.Message
+			}
+		}
+	}
+	// Diagnostic aid: dump the upstream body for 4xx/5xx so a Kiro rejection
+	// can be understood. Gated behind KIRO_DEBUG_HTTP to stay silent by default.
+	if response != nil && os.Getenv("KIRO_DEBUG_HTTP") != "" &&
+		response.StatusCode >= http.StatusBadRequest && body != "" {
+		fmt.Fprintf(os.Stderr, "[kiro-debug] HTTP %d body: %s\n", response.StatusCode, body)
+	}
+	return &KiroExecutionError{
+		status: response.StatusCode, code: code, summary: summary, retryAfter: retryAfter,
+	}
+}
+
+// kiroRetryAfterFromBody reads Kiro's JSON body field "retryAfterMilliseconds"
+// (used for CREDIT_CONSUMPTION_RATE_EXCEEDED throttling) as a duration.
+func kiroRetryAfterFromBody(body string) time.Duration {
+	if body == "" {
+		return 0
+	}
+	var envelope struct {
+		RetryAfterMS int64 `json:"retryAfterMilliseconds"`
+	}
+	if err := json.Unmarshal([]byte(body), &envelope); err != nil || envelope.RetryAfterMS <= 0 {
+		return 0
+	}
+	return time.Duration(envelope.RetryAfterMS) * time.Millisecond
+}
+
+// kiroRetryAfterFromHeader reads the upstream Retry-After header as a whole
+// number of seconds.  Kiro throttling (HTTP 429) commonly reports the exact
+// window to wait; propagating it lets the gateway cooldown the credential for
+// precisely the upstream-suggested delay instead of a fixed 10-minute default.
+func kiroRetryAfterFromHeader(header http.Header) time.Duration {
+	if header == nil {
+		return 0
+	}
+	value := strings.TrimSpace(header.Get("Retry-After"))
+	if value == "" {
+		return 0
+	}
+	seconds, err := strconv.ParseInt(value, 10, 64)
+	if err != nil || seconds <= 0 {
+		return 0
+	}
+	return time.Duration(seconds) * time.Second
 }
 
 // kiroJSONEnvelopeError creates an error from a Kiro JSON envelope.
@@ -514,7 +731,11 @@ func kiroJSONEnvelopeError(response *http.Response, body io.Reader) error {
 	if strings.TrimSpace(message) == "" {
 		message = fmt.Sprintf("Kiro upstream returned non-eventstream response (HTTP %d)", response.StatusCode)
 	}
-	return &KiroExecutionError{status: response.StatusCode, code: code, summary: message}
+	retryAfter := kiroRetryAfterFromHeader(response.Header)
+	if fromBody := kiroRetryAfterFromBody(string(raw)); fromBody > retryAfter {
+		retryAfter = fromBody
+	}
+	return &KiroExecutionError{status: response.StatusCode, code: code, summary: message, retryAfter: retryAfter}
 }
 
 // convertKiroDoError wraps a Go error as a Kiro execution error.

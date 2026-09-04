@@ -18,7 +18,7 @@ import {
 
 export type ChannelFieldInputKind = 'text' | 'url' | 'secret'
 export type ChannelConnectionType = 'api_key' | 'subscription'
-const authorizationMethods = ['browser_oauth', 'device_oauth', 'oauth_file'] as const
+const authorizationMethods = ['browser_oauth', 'device_oauth', 'oauth_file', 'self_discovery'] as const
 export type ChannelAuthorizationMethod = (typeof authorizationMethods)[number]
 export type ChannelCredentialAction = 'reset_credit'
 export type ChannelNoticeID = 'claude_oauth_risk' | 'antigravity_oauth_risk'

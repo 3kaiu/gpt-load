@@ -8,6 +8,7 @@ import {
   ListChecks,
   Plus,
   Search,
+  UserPlus,
 } from '@lucide/vue'
 import { useQuery, useQueryClient } from '@tanstack/vue-query'
 import { computed, onBeforeUnmount, ref, watch } from 'vue'
@@ -39,6 +40,7 @@ import {
   revealCredential,
   refreshCredential as refreshCredentialRequest,
   rediscoverLocalCredential,
+  discoverAppendLocalKiroCredential,
   restoreCredential,
   restoreTestedCredential,
   refreshCredentialObservation,
@@ -754,6 +756,40 @@ async function rediscoverCredential(item: CredentialItemDto): Promise<void> {
     await Promise.allSettled([refetchActiveCredentialPage(), refetchGroupSummary()])
   } finally {
     setPending(item.credential_id, 'rediscover-local', false)
+  }
+}
+
+async function appendLocalKiroCredential(): Promise<void> {
+  if (props.channelId !== 'kiro') return
+  if (pendingOperations.value.has('batch:append-local')) return
+  feedback.value = ''
+  setPending('batch', 'append-local', true)
+  try {
+    const result = await discoverAppendLocalKiroCredential(client, props.groupId)
+    if (result.appended) {
+      await Promise.allSettled([refetchActiveCredentialPage(), refetchGroupSummary()])
+      toast.show({
+        message: t('group.credentials.subscription.appendLocalAccountSucceeded'),
+        tone: 'success',
+      })
+    } else if (result.reason === 'already_present') {
+      toast.show({
+        message: t('group.credentials.subscription.appendLocalAccountAlreadyPresent'),
+        tone: 'warning',
+      })
+    } else {
+      toast.show({
+        message: t('group.credentials.subscription.appendLocalAccountNoLocalAccount'),
+        tone: 'warning',
+      })
+    }
+  } catch (cause) {
+    feedback.value = t(
+      presentSubscriptionErrorKey(cause, 'group.credentials.subscription.appendLocalAccountFailed'),
+    )
+    await Promise.allSettled([refetchActiveCredentialPage(), refetchGroupSummary()])
+  } finally {
+    setPending('batch', 'append-local', false)
   }
 }
 
@@ -1516,6 +1552,15 @@ async function runBatch(
             </button>
           </div>
         </AppPopover>
+        <AppButton
+          v-if="isKiroChannel"
+          variant="secondary"
+          :busy="pendingOperations.has('batch:append-local')"
+          :disabled="bulkActionsBusy"
+          @click="appendLocalKiroCredential()"
+        >
+          <UserPlus :size="16" aria-hidden="true" />{{ t('group.credentials.subscription.appendLocalAccount') }}
+        </AppButton>
         <AppButton
           v-if="connectionType === 'subscription' && authorizationMethods.length > 0"
           :disabled="bulkActionsBusy"

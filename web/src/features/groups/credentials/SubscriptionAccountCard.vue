@@ -481,7 +481,17 @@ function remainingPercent(window: CredentialQuotaWindowDto): number | undefined 
   return undefined
 }
 
+function isRawCreditsWindow(window: CredentialQuotaWindowDto): boolean {
+  return window.unit === 'credits' || window.unit === 'invocations'
+}
+
 function quotaValueLabel(window: CredentialQuotaWindowDto): string {
+  if (isRawCreditsWindow(window) && window.used !== undefined && window.limit !== undefined) {
+    return t('group.credentials.subscription.usedOfLimit', {
+      used: n(window.used),
+      limit: n(window.limit),
+    })
+  }
   const value = remainingPercent(window)
   if (value !== undefined) {
     return t('group.credentials.subscription.remainingPercent', { value: n(value) })
@@ -517,6 +527,9 @@ function quotaPeriodTooltip(window: CredentialQuotaWindowDto): string | undefine
 }
 
 function usedPercentValue(window: CredentialQuotaWindowDto): string {
+  if (isRawCreditsWindow(window) && window.used !== undefined && window.limit !== undefined) {
+    return `${n(window.used)} / ${n(window.limit)}`
+  }
   const remaining = remainingPercent(window)
   return remaining === undefined ? '—' : `${n(100 - remaining)}%`
 }

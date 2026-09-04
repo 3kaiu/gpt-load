@@ -27,6 +27,7 @@ var (
 	reasonInvalidProtocolRequest        = reason{Status: http.StatusBadRequest, Code: "invalid_protocol_request", Message: "Invalid protocol request."}
 	reasonModelRequiredByFilter         = reason{Status: http.StatusBadRequest, Code: "model_required_by_filter", Message: "A model is required by the access key filter."}
 	reasonNoCandidate                   = reason{Status: http.StatusServiceUnavailable, Code: "no_available_candidate", Message: "No available upstream candidate."}
+	reasonUpstreamRateLimiting          = reason{Status: http.StatusTooManyRequests, Code: "upstream_rate_limited", Message: "Upstream rate limit was reached; retry after the indicated delay."}
 	reasonUpstreamConnect               = reason{Status: http.StatusBadGateway, Code: "upstream_connect_failed", Message: "Could not connect to an upstream service."}
 	reasonUpstreamTimeout               = reason{Status: http.StatusGatewayTimeout, Code: "upstream_timeout", Message: "Upstream request timed out."}
 	reasonUpstreamProtocol              = reason{Status: http.StatusBadGateway, Code: "upstream_protocol_error", Message: "Upstream returned an unsupported response."}

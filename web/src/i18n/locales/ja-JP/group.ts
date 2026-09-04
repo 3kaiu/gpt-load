@@ -485,6 +485,11 @@ export default {
         rediscoverLocalFailed: 'ローカルアカウントを再取得できません',
         rediscoverSameAccount: '現在のローカルアカウントのままです',
         rediscoverNoLocalAccount: 'ローカルのプライマリアカウントが見つかりません',
+        appendLocalAccount: 'ローカルアカウントを追加',
+        appendLocalAccountSucceeded: '現在のローカルアカウントを追加しました',
+        appendLocalAccountAlreadyPresent: '現在のローカルアカウントは既に追加済みです',
+        appendLocalAccountNoLocalAccount: 'ローカルのプライマリアカウントが見つかりません',
+        appendLocalAccountFailed: 'ローカルアカウントを追加できません',
         dailySuccessSummary: '24 時間の成功',
         dailyFailureSummary: '24 時間の失敗',
         dailyIncomplete:
@@ -529,6 +534,7 @@ export default {
         remaining: '残り {remaining} / {limit}',
         remainingAmount: '残り {remaining}',
         remainingPercent: '残り {value}%',
+        usedOfLimit: '使用 {used} / {limit}',
         quotaPeriod: '現在の期間\n{start} → {end}',
         quotaPendingHint:
           '{period}\n現在の期間は終了しています。利用枠は前回同期時のままです。最新情報は手動で更新してください。',

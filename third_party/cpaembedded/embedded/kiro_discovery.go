@@ -1,6 +1,8 @@
 package embedded
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -60,6 +62,21 @@ type kiroTokenCache struct {
 	ExpiresAt    string `json:"expiresAt"`
 	Provider     string `json:"provider"`
 	ClientIDHash string `json:"clientIdHash"`
+}
+
+// kiroAccountIDFromRefreshToken derives a stable per-account identity from the
+// Kiro refreshToken. The SSO token cache carries no email or account ARN, and
+// clientIdHash is the Kiro application's client ID (identical across every
+// account on the machine), so it cannot distinguish accounts. The refreshToken
+// is unique per account and only changes on re-authentication, making its hash
+// a reliable account identifier. Empty input yields "".
+func kiroAccountIDFromRefreshToken(refreshToken string) string {
+	refreshToken = strings.TrimSpace(refreshToken)
+	if refreshToken == "" {
+		return ""
+	}
+	h := sha256.Sum256([]byte(refreshToken))
+	return "rt:" + hex.EncodeToString(h[:8])
 }
 
 // kiroProfileFilePaths returns the Kiro desktop app profile-resolver locations.
@@ -223,11 +240,14 @@ func readKiroTokenCache() (KiroCredential, bool, error) {
 			Region:       region,
 			ProfileARN:   "",
 		}
-		// The token cache carries no email or account ARN, but clientIdHash is a
-		// stable SSO client binding that uniquely identifies the logged-in Kiro
-		// account and survives token refresh. Surface it as the account identity
-		// so the credential is non-empty and stable across the lifecycle.
-		credential.AccountID = strings.TrimSpace(cache.ClientIDHash)
+		// clientIdHash is the Kiro application's client ID (same across all
+		// accounts on this machine), NOT an account identifier. Use the
+		// refreshToken hash instead: it is unique per account and stable across
+		// regular token refreshes (only changes on re-authentication).
+		credential.AccountID = kiroAccountIDFromRefreshToken(strings.TrimSpace(cache.RefreshToken))
+		if credential.AccountID == "" {
+			credential.AccountID = strings.TrimSpace(cache.ClientIDHash)
+		}
 		// The token cache does not store profileArn; the Kiro desktop app
 		// persists the account's resolved profileArn in its global storage.
 		// Surface it so the management-plane model-discovery call is satisfiable.

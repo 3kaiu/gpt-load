@@ -25,6 +25,7 @@ import type {
   CredentialResetCreditConsumeDto,
   CredentialRecoveryDto,
   CredentialRediscoverResultDto,
+  CredentialDiscoverAppendResultDto,
   CredentialRevealDto,
   CredentialStatus,
   CredentialSummaryDto,
@@ -997,6 +998,44 @@ export async function rediscoverLocalCredential(
 ): Promise<CredentialRediscoverResultDto> {
   return projectCredentialRediscover(
     await client.request(`/api/groups/${groupId}/credentials/${credentialId}/rediscover-local`, {
+      method: 'POST',
+      json: {},
+      signal,
+    }),
+  )
+}
+
+const credentialDiscoverAppendFields = [
+  'appended',
+  'reason',
+  'account',
+  'credential_id',
+] as const
+
+function projectCredentialDiscoverAppend(value: unknown): CredentialDiscoverAppendResultDto {
+  const record = projectRecord(value)
+  assertNoSecretLikeFields(record, credentialDiscoverAppendFields)
+  const appended = projectBoolean(record.appended)
+  const result: CredentialDiscoverAppendResultDto = { appended }
+  if (record.reason !== undefined) {
+    result.reason = projectEnum(record.reason, ['no_local_account', 'already_present'] as const)
+  }
+  if (record.account !== undefined) {
+    result.account = projectString(record.account, { allowEmpty: false })
+  }
+  if (record.credential_id !== undefined) {
+    result.credential_id = projectSafeInteger(record.credential_id, { minimum: 1 })
+  }
+  return result
+}
+
+export async function discoverAppendLocalKiroCredential(
+  client: ApiClient,
+  groupId: number,
+  signal?: AbortSignal,
+): Promise<CredentialDiscoverAppendResultDto> {
+  return projectCredentialDiscoverAppend(
+    await client.request(`/api/groups/${groupId}/credentials/discover-append`, {
       method: 'POST',
       json: {},
       signal,

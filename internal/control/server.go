@@ -512,6 +512,24 @@ func (s *Server) handleRediscoverLocalKiroCredential(c *gin.Context) {
 	response.SuccessI18n(c, "common.success", result)
 }
 
+func (s *Server) handleAppendLocalKiroCredential(c *gin.Context) {
+	groupID, ok := groupID(c, "append_local_kiro_credential")
+	if !ok {
+		return
+	}
+	if err := bindOptionalEmptyJSONObject(c); err != nil {
+		writeServiceError(c, "append_local_kiro_credential", mapControlJSONError(err))
+		return
+	}
+	result, err := s.service.AppendKiroDiscoveredCredential(c.Request.Context(), groupID)
+	if err != nil {
+		writeServiceError(c, "append_local_kiro_credential", err)
+		return
+	}
+	setSecretResponseHeaders(c)
+	response.SuccessI18n(c, "common.success", result)
+}
+
 func (s *Server) handleConsumeGroupCredentialResetCredit(c *gin.Context) {
 	groupID, ok := groupID(c, "consume_group_credential_reset_credit")
 	if !ok {

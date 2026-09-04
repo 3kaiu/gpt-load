@@ -93,16 +93,25 @@ func kiroMeterWindow(index int, meter UsageMeter) (providerobservation.QuotaWind
 	resetAt := kiroResetAt(meter.ResetDate)
 	switch unit {
 	case "invocations", "credits":
+		// Surface the real per-account credit figures (e.g. "9.97 used / 50")
+		// instead of folding them into a percentage against an implicit 100
+		// limit. Keeping the raw Used/Limit lets the UI show the exact numbers
+		// the Kiro desktop app shows. Utilization is intentionally omitted for
+		// this meter so the account-card prefers the raw used/remaining labels;
+		// rotation still works because kiroPrimaryQuotaUsage falls back to
+		// Used/Limit when Utilization is absent.
 		window.LabelKey = providerobservation.QuotaLabelIncludedUsage
-		window.Unit = "percent"
-		used := meter.PercentageUsed
+		window.Unit = "credits"
+		used := meter.CurrentUsage
 		window.Used = &used
-		limit := 100.0
+		limit := meter.UsageLimit
+		if limit <= 0 {
+			limit = 100.0
+			window.Used = &used
+		}
 		window.Limit = &limit
-		remaining := 100 - used
+		remaining := limit - used
 		window.Remaining = &remaining
-		utilization := used / 100
-		window.Utilization = &utilization
 		window.State = "available"
 		if remaining <= 0 {
 			window.State = "exhausted"

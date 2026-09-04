@@ -301,6 +301,17 @@ func (s *Server) HTTPModule() httproute.Module {
 				s.handleRediscoverLocalKiroCredential,
 			),
 			controlRoute(
+				"control.group-credentials.discover-append",
+				http.MethodPost,
+				"/groups/:group_id/credentials/discover-append",
+				s.auditMutation(newMutationDescriptor(
+					"group_credential_discover_append",
+					"group_credential",
+					groupCredentialMutationLocator,
+				)),
+				s.handleAppendLocalKiroCredential,
+			),
+			controlRoute(
 				"control.group-credentials.reset-credit-consume",
 				http.MethodPost,
 				"/groups/:group_id/credentials/:credential_id/reset-credits/consume",

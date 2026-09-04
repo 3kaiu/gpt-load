@@ -64,12 +64,13 @@ type KiroCredential struct {
 // KiroOptions provides test-only endpoint/clock seams. Production callers use
 // zero values so all endpoints come from fixed Kiro service discovery.
 type KiroOptions struct {
-	Region         string
-	RuntimeHost    string
-	ManagementHost string
-	AuthHost       string
-	HTTPClient     *http.Client
-	Now            func() time.Time
+	Region              string
+	RuntimeHost         string
+	ManagementHost      string
+	AuthHost            string
+	HTTPClient          *http.Client
+	Now                 func() time.Time
+	TokenRefreshLeadTime time.Duration
 }
 
 // KiroDeviceState is the persisted client-side device authorization state.

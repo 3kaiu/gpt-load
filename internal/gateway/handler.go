@@ -78,6 +78,7 @@ type runtimeCredentialRegistry interface {
 	CaptureActiveCredentialRefs(groupIDs []uint) []state.CredentialRef
 	CredentialRef(credentialID uint) (state.CredentialRef, bool)
 	ActiveEncryptedCredentialDataIfMatch(ref state.CredentialRef) (string, bool)
+	CredentialCooldownUntil(credentialID uint) (time.Time, bool)
 	SetCooldownWithChange(credentialID uint, until time.Time) (exists bool, changed bool)
 	SetCooldownWithChangeIfVersion(credentialID uint, expectedVersion uint64, until time.Time) (matched bool, changed bool)
 	IncrFailure(credentialID uint) (int, bool)
@@ -1240,7 +1241,48 @@ func (handler *Handler) executeAttempts(
 		handler.completeReason(ginContext, recorder, reasonModelRequiredByFilter)
 		return
 	}
+	if handler.completeNoCandidateWithCooldown(ginContext, allowedCredentialRefs, recorder) {
+		return
+	}
 	handler.completeReason(ginContext, recorder, reasonNoCandidate)
+}
+
+// completeNoCandidateWithCooldown reports whether the request has no available
+// candidate because every permitted credential is currently in a rate-limit
+// cooldown. When that is the case it writes an upstream 429 (Too Many Requests)
+// with a Retry-After header derived from the earliest cooldown deadline, letting
+// an Anthropic/OpenAI-conformant client (e.g. Kimi Code CLI) wait the correct
+// delay and retry instead of hammering the gateway with short-retry 503s during
+// a long upstream cooldown.
+func (handler *Handler) completeNoCandidateWithCooldown(
+	ginContext *gin.Context,
+	allowedCredentialRefs map[uint]state.CredentialRef,
+	recorder *requestRecorder,
+) bool {
+	if handler == nil || handler.registry == nil || ginContext == nil || len(allowedCredentialRefs) == 0 {
+		return false
+	}
+	now := handler.quotaNow()
+	earliest := time.Time{}
+	for credentialID := range allowedCredentialRefs {
+		until, exists := handler.registry.CredentialCooldownUntil(credentialID)
+		if !exists || !until.After(now) {
+			continue
+		}
+		if earliest.IsZero() || until.Before(earliest) {
+			earliest = until
+		}
+	}
+	if earliest.IsZero() {
+		return false
+	}
+	seconds := int64(time.Until(earliest).Seconds()) + 1
+	if seconds < 1 {
+		seconds = 1
+	}
+	ginContext.Writer.Header().Set("Retry-After", strconv.FormatInt(seconds, 10))
+	handler.completeReason(ginContext, recorder, reasonUpstreamRateLimiting)
+	return true
 }
 
 func initializeDebugHeaders(headers http.Header) {

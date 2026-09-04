@@ -310,6 +310,14 @@ export interface CredentialRediscoverResultDto {
   error_code?: string
 }
 
+/** 追加本机 Kiro 当前账号：读取本地登录账号，若分组内不存在则新增一行（不覆盖已有）。 */
+export interface CredentialDiscoverAppendResultDto {
+  appended: boolean
+  reason?: 'no_local_account' | 'already_present'
+  account?: string
+  credential_id?: number
+}
+
 export type CredentialTestOutcome = 'passed' | 'failed' | 'inconclusive'
 
 export type CredentialTestReason =

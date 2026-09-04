@@ -1957,6 +1957,10 @@ func (panicRuntimeRegistry) ActiveEncryptedCredentialDataIfMatch(state.Credentia
 	panic("model endpoint matched an upstream key")
 }
 
+func (panicRuntimeRegistry) CredentialCooldownUntil(uint) (time.Time, bool) {
+	panic("model endpoint read a credential cooldown")
+}
+
 func (panicRuntimeRegistry) SetCooldown(uint, time.Time) bool {
 	panic("model endpoint set cooldown")
 }

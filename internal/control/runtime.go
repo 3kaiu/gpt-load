@@ -3,6 +3,7 @@ package control
 import (
 	"context"
 	"math/rand/v2"
+	"os"
 	"sync"
 	"time"
 
@@ -164,11 +165,17 @@ func (runtime *Runtime) Run(ctx context.Context) {
 		}()
 	}
 	if service, ok := runtime.operationRecovery.(*Service); ok {
-		wait.Add(1)
-		go func() {
-			defer wait.Done()
-			service.RunKiroRotation(ctx)
-		}()
+		// The Kiro background rotation overwrites a single credential row when
+		// its quota is exhausted. Multi-account users prefer to accumulate
+		// accounts by hand via the discover-append action instead, so it is
+		// disabled by default and only runs when KIRO_AUTO_ROTATE=1.
+		if os.Getenv("KIRO_AUTO_ROTATE") == "1" {
+			wait.Add(1)
+			go func() {
+				defer wait.Done()
+				service.RunKiroRotation(ctx)
+			}()
+		}
 	}
 	if runtime.catalogSync != nil {
 		wait.Add(1)
