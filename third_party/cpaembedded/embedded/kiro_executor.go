@@ -147,16 +147,20 @@ type kiroEndpointVariant struct {
 
 // kiroEndpointVariants returns the available API endpoint variants for the
 // given region.  The first entry is the default (runtime); the rest are
-// alternatives for rotation on 429.
+// kiroEndpointVariants returns the upstream endpoints to try.  Only the Kiro
+// runtime endpoint can authenticate a Kiro local/web credential.  The AmazonQ
+// and CodeWhisperer AWS endpoints (q.*.amazonaws.com / codewhisperer.*.amazonaws.com)
+// are NOT valid rotation targets: they use a separate AWS SSO token ecosystem and
+// always reject the Kiro bearer token (403), so rotation to them would turn a
+// clean 429 cooldown into an opaque 502.  Keep a single variant for now; if Kiro
+// later exposes additional runtime endpoints with bearer-token auth, add them here.
 func kiroEndpointVariants(region string) []kiroEndpointVariant {
 	region = strings.ToLower(strings.TrimSpace(region))
 	if region == "" {
-		region = "us-east-1"
+		region = DefaultKiroRegion
 	}
 	return []kiroEndpointVariant{
 		{host: "runtime." + region + ".kiro.dev"},
-		{host: "q." + region + ".amazonaws.com"},
-		{host: "codewhisperer." + region + ".amazonaws.com", amzTarget: kiroAMZTarget},
 	}
 }
 
@@ -263,32 +267,65 @@ func (executor *kiroHTTPExecutor) ExecuteCanonical(
 		executor.setAuth(req, credential)
 		response, err := executor.client.Do(req)
 		if err != nil {
-			return ExecuteResponse{}, convertKiroDoError(err)
-		}
-		if response.StatusCode == http.StatusTooManyRequests {
-			response.Body.Close()
+			if os.Getenv("KIRO_DEBUG_HTTP") != "" {
+				fmt.Fprintf(os.Stderr, "[kiro-debug] network error on endpoint %s: %v\n", variant.host, err)
+			}
+			lastErr = convertKiroDoError(err)
 			if attempt < kiroEndpointRetries {
 				delay := kiroEndpointRetryBase + time.Duration(attempt)*time.Second
-				if os.Getenv("KIRO_DEBUG_HTTP") != "" {
-					fmt.Fprintf(os.Stderr, "[kiro-debug] 429 on endpoint %s, rotating (attempt %d/%d, delay %v)\n",
-						variant.host, attempt+1, kiroEndpointRetries, delay)
-				}
 				select {
 				case <-time.After(delay):
 				case <-ctx.Done():
 					return ExecuteResponse{}, ctx.Err()
 				}
-				lastErr = &KiroExecutionError{status: http.StatusTooManyRequests, summary: "Kiro upstream rate limit was reached"}
 				continue
 			}
-			return ExecuteResponse{}, kiroHTTPErrorFromResponse(response)
+			return ExecuteResponse{}, lastErr
 		}
-		defer func() { _ = response.Body.Close() }()
+		if response.StatusCode == http.StatusTooManyRequests {
+			err := kiroHTTPErrorFromResponse(response)
+			if os.Getenv("KIRO_DEBUG_HTTP") != "" {
+				fmt.Fprintf(os.Stderr, "[kiro-debug] 429 on endpoint %s, returning error with retry-after\n", variant.host)
+			}
+			return ExecuteResponse{}, err
+		}
 		if response.StatusCode != http.StatusOK {
-			return ExecuteResponse{}, kiroHTTPErrorFromResponse(response)
+			raw, _ := io.ReadAll(io.LimitReader(response.Body, 8*1024))
+			response.Body.Close()
+			if os.Getenv("KIRO_DEBUG_HTTP") != "" {
+				fmt.Fprintf(os.Stderr, "[kiro-debug] HTTP %d on endpoint %s body: %s\n",
+					response.StatusCode, variant.host, string(raw))
+			}
+			lastErr = &KiroExecutionError{status: response.StatusCode, summary: fmt.Sprintf("Kiro upstream returned HTTP %d: %s", response.StatusCode, string(raw))}
+			if attempt < kiroEndpointRetries {
+				delay := kiroEndpointRetryBase + time.Duration(attempt)*time.Second
+				select {
+				case <-time.After(delay):
+				case <-ctx.Done():
+					return ExecuteResponse{}, ctx.Err()
+				}
+				continue
+			}
+			return ExecuteResponse{}, lastErr
 		}
 		if contentType := response.Header.Get("Content-Type"); !strings.Contains(contentType, "amazon.eventstream") {
-			return ExecuteResponse{}, kiroJSONEnvelopeError(response, response.Body)
+			raw, _ := io.ReadAll(io.LimitReader(response.Body, 8*1024))
+			response.Body.Close()
+			if os.Getenv("KIRO_DEBUG_HTTP") != "" {
+				fmt.Fprintf(os.Stderr, "[kiro-debug] non-eventstream Content-Type on endpoint %s: %s body: %s\n",
+					variant.host, contentType, string(raw))
+			}
+			lastErr = &KiroExecutionError{status: http.StatusBadGateway, summary: "Kiro upstream returned non-eventstream response"}
+			if attempt < kiroEndpointRetries {
+				delay := kiroEndpointRetryBase + time.Duration(attempt)*time.Second
+				select {
+				case <-time.After(delay):
+				case <-ctx.Done():
+					return ExecuteResponse{}, ctx.Err()
+				}
+				continue
+			}
+			return ExecuteResponse{}, lastErr
 		}
 		var (
 			blocks      []map[string]any
@@ -452,14 +489,59 @@ func (executor *kiroHTTPExecutor) ExecuteStreamCanonical(
 		executor.setAuth(req, credential)
 		response, err := executor.client.Do(req)
 		if err != nil {
-			return nil, convertKiroDoError(err)
+			if os.Getenv("KIRO_DEBUG_HTTP") != "" {
+				fmt.Fprintf(os.Stderr, "[kiro-debug] network error on endpoint %s: %v\n", variant.host, err)
+			}
+			lastErr = convertKiroDoError(err)
+			if attempt < kiroEndpointRetries {
+				delay := kiroEndpointRetryBase + time.Duration(attempt)*time.Second
+				select {
+				case <-time.After(delay):
+				case <-ctx.Done():
+					return nil, ctx.Err()
+				}
+				continue
+			}
+			return nil, lastErr
 		}
 		if response.StatusCode == http.StatusTooManyRequests {
+			err := kiroHTTPErrorFromResponse(response)
+			if os.Getenv("KIRO_DEBUG_HTTP") != "" {
+				fmt.Fprintf(os.Stderr, "[kiro-debug] 429 on endpoint %s, returning error with retry-after\n", variant.host)
+			}
+			return nil, err
+		}
+		if response.StatusCode != http.StatusOK {
+			raw, _ := io.ReadAll(io.LimitReader(response.Body, 8*1024))
 			response.Body.Close()
+			if os.Getenv("KIRO_DEBUG_HTTP") != "" {
+				fmt.Fprintf(os.Stderr, "[kiro-debug] HTTP %d on endpoint %s body: %s\n",
+					response.StatusCode, variant.host, string(raw))
+			}
+			lastErr = &KiroExecutionError{status: response.StatusCode, summary: fmt.Sprintf("Kiro upstream returned HTTP %d: %s", response.StatusCode, string(raw))}
+			if attempt < kiroEndpointRetries {
+				delay := kiroEndpointRetryBase + time.Duration(attempt)*time.Second
+				select {
+				case <-time.After(delay):
+				case <-ctx.Done():
+					return nil, ctx.Err()
+				}
+				continue
+			}
+			return nil, lastErr
+		}
+		if contentType := response.Header.Get("Content-Type"); !strings.Contains(contentType, "amazon.eventstream") {
+			raw, _ := io.ReadAll(io.LimitReader(response.Body, 8*1024))
+			response.Body.Close()
+			if os.Getenv("KIRO_DEBUG_HTTP") != "" {
+				fmt.Fprintf(os.Stderr, "[kiro-debug] non-eventstream Content-Type on endpoint %s: %s body: %s\n",
+					variant.host, contentType, string(raw))
+			}
+			lastErr = &KiroExecutionError{status: http.StatusBadGateway, summary: "Kiro upstream returned non-eventstream response"}
 			if attempt < kiroEndpointRetries {
 				delay := kiroEndpointRetryBase + time.Duration(attempt)*time.Second
 				if os.Getenv("KIRO_DEBUG_HTTP") != "" {
-					fmt.Fprintf(os.Stderr, "[kiro-debug] 429 on endpoint %s, rotating (attempt %d/%d, delay %v)\n",
+					fmt.Fprintf(os.Stderr, "[kiro-debug] non-eventstream on endpoint %s, rotating (attempt %d/%d, delay %v)\n",
 						variant.host, attempt+1, kiroEndpointRetries, delay)
 				}
 				select {
@@ -469,15 +551,7 @@ func (executor *kiroHTTPExecutor) ExecuteStreamCanonical(
 				}
 				continue
 			}
-			return nil, kiroHTTPErrorFromResponse(response)
-		}
-		if response.StatusCode != http.StatusOK {
-			defer func() { _ = response.Body.Close() }()
-			return nil, kiroHTTPErrorFromResponse(response)
-		}
-		if contentType := response.Header.Get("Content-Type"); !strings.Contains(contentType, "amazon.eventstream") {
-			defer func() { _ = response.Body.Close() }()
-			return nil, kiroJSONEnvelopeError(response, response.Body)
+			return nil, lastErr
 		}
 		chunks := make(chan ExecuteStreamChunk)
 		go func() {
@@ -740,7 +814,10 @@ func kiroJSONEnvelopeError(response *http.Response, body io.Reader) error {
 
 // convertKiroDoError wraps a Go error as a Kiro execution error.
 func convertKiroDoError(err error) error {
-	var netErr interface{ Timeout() bool }
+	if os.Getenv("KIRO_DEBUG_HTTP") != "" {
+		fmt.Fprintf(os.Stderr, "[kiro-debug] network error: %v\n", err)
+	}
+	var netErr interface{ Timeout() }
 	if errors.As(err, &netErr) {
 		return &KiroExecutionError{status: 0, code: "network", summary: "Kiro network request failed"}
 	}
