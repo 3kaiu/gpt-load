@@ -331,12 +331,12 @@ func refreshKiroCredentialOnce(ctx context.Context, current KiroCredential, opti
 		tokenEndpoint = authHost + "refreshToken"
 	}
 	// SECURITY: a stored token_endpoint must resolve to a Kiro-auth allowlisted
-	// host, otherwise we refuse to call it. This prevents an SSRF where a
-	// tampered credential field redirects the token refresh to an arbitrary
-	// internal or external host. When no safe stored endpoint is available we
-	// fall back to the hardcoded per-region default.
+	// host via HTTPS, otherwise we refuse to call it. This prevents both SSRF
+	// (arbitrary host redirect) and CWE-319 (cleartext token transmission).
 	parsed, parseErr := url.Parse(tokenEndpoint)
-	if parseErr != nil || !kiroValidTokenEndpointHosts[parsed.Hostname()] {
+	if parseErr != nil ||
+		!kiroValidTokenEndpointHosts[parsed.Hostname()] ||
+		!strings.EqualFold(parsed.Scheme, "https") {
 		authHost, err := KiroAuthURL(region)
 		if err != nil {
 			return KiroCredential{}, err

@@ -193,14 +193,18 @@ type kiroToolUseAccumulator struct {
 	started   bool
 }
 
-// update ingests one toolUseEvent payload. A frame carrying a full toolUseId and
-// input yields a ready kiroEvent immediately. When input arrives split across
-// frames (fragmented), each chunk is appended to the accumulator and emitted on
-// flush at end of stream.
+// update ingests one toolUseEvent payload. A frame carrying a full toolUseId,
+// non-empty input, and stop=true is emitted immediately. When input arrives
+// split across frames (fragmented), each chunk is appended to the accumulator
+// and emitted on flush at end of stream or when a stop frame arrives.
 func (acc *kiroToolUseAccumulator) update(raw map[string]json.RawMessage) (kiroEvent, bool) {
 	toolUseID := asKiroString(raw["toolUseId"])
 	toolName := asKiroString(raw["name"])
 	input := raw["input"]
+	var stop bool
+	if s, ok := raw["stop"]; ok {
+		stop = asKiroBool(s)
+	}
 
 	// Starting a new tool while one is in progress: flush the previous fragment.
 	if acc.started && toolUseID != "" && toolUseID != acc.toolUseID {
@@ -212,29 +216,33 @@ func (acc *kiroToolUseAccumulator) update(raw map[string]json.RawMessage) (kiroE
 	if toolUseID == "" {
 		return kiroEvent{}, false
 	}
-	// When a full input arrives together with the toolUseId, this call is
-	// complete in this frame: emit immediately.
+	// Accumulate any input present in this frame.
 	if len(input) > 0 {
-		acc.started = false
-		acc.inputBuf = nil
-		return kiroEvent{
-			Type:      kiroEventToolUse,
-			ToolUseID: toolUseID,
-			ToolName:  toolName,
-			ToolInput: string(input),
-			ToolStop:  true,
-		}, true
+		acc.inputBuf = append(acc.inputBuf, input...)
 	}
-	// Fragmented: begin or continue accumulation, appending each partial input
-	// chunk so flush can emit the concatenated input instead of an empty blob.
-	if !acc.started {
-		acc.toolUseID = toolUseID
-		acc.toolName = toolName
-		acc.started = true
-		acc.inputBuf = nil
+	// Only emit when stop signals the final chunk. Non-stop frames accumulate
+	// their input chunks and return without emitting.
+	if !stop {
+		if !acc.started {
+			acc.toolUseID = toolUseID
+			acc.toolName = toolName
+			acc.started = true
+		}
+		return kiroEvent{}, false
 	}
-	acc.inputBuf = append(acc.inputBuf, input...)
-	return kiroEvent{}, false
+	// stop == true: emit whatever has been accumulated (possibly just this frame's input).
+	result := kiroEvent{
+		Type:      kiroEventToolUse,
+		ToolUseID: toolUseID,
+		ToolName:  toolName,
+		ToolInput: string(acc.inputBuf),
+		ToolStop:  true,
+	}
+	acc.started = false
+	acc.toolUseID = ""
+	acc.toolName = ""
+	acc.inputBuf = nil
+	return result, true
 }
 
 // flush finalizes and returns the currently-accumulated tool call, if any.
@@ -265,6 +273,14 @@ func asKiroString(raw json.RawMessage) string {
 		return string(raw)
 	}
 	return value
+}
+
+func asKiroBool(raw json.RawMessage) bool {
+	var b bool
+	if err := json.Unmarshal(raw, &b); err != nil {
+		return false
+	}
+	return b
 }
 
 // parseKiroStream reads event frames and invokes callback until it returns true.

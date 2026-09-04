@@ -127,7 +127,7 @@ func ValidateRecoverable0008(db *gorm.DB) error {
 	}
 	definition, err := credentialStageAuthMethodDefinition0008(db)
 	if err != nil {
-		return nil
+		return fmt.Errorf("validate recoverable credential stage self discovery: %w", err)
 	}
 	if strings.Contains(strings.ToLower(definition), "self_discovery") {
 		return nil
@@ -143,8 +143,12 @@ func Validate0008(db *gorm.DB) error {
 	if !db.Migrator().HasConstraint(credentialStageTable0008, authMethodConstraint0008) {
 		return fmt.Errorf("validate credential stage self discovery: constraint %q is missing", authMethodConstraint0008)
 	}
-	if _, err := credentialStageAuthMethodDefinition0008(db); err != nil {
+	definition, err := credentialStageAuthMethodDefinition0008(db)
+	if err != nil {
 		return err
+	}
+	if !strings.Contains(strings.ToLower(definition), "self_discovery") {
+		return fmt.Errorf("validate credential stage self discovery: constraint %q does not include self_discovery", authMethodConstraint0008)
 	}
 	return nil
 }

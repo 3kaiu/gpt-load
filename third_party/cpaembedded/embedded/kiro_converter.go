@@ -289,6 +289,7 @@ func kiroConversationFromRequest(request kiroRequest) (kiroConversationState, st
 		content, images := extractKiroUserContent(message.Content)
 		switch role {
 		case "user":
+			lastImages = nil
 			hasToolResult := jsonToolResultInMessage(message.Content)
 			entry := kiroHistoryEntry{
 				UserInputMessage: &kiroHistoryUser{
