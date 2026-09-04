@@ -11,6 +11,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/tidwall/sjson"
@@ -32,6 +33,22 @@ const (
 	kiroEndpointRetries = 2
 	// kiroEndpointRetryBase is the base delay between endpoint rotation retries.
 	kiroEndpointRetryBase = 2 * time.Second
+	// kiroEndpointBucketCooldown is how long one endpoint stays on the block
+	// list after a 429 before it is retried.  Only that endpoint is blocked; the
+	// others in the account remain available, matching the kiro2cc-proxy /
+	// AIClient2API bucket model.  The effect is rotation in 2-30s instead of the
+	// full 5-minute credit-consumption cooldown.
+	kiroEndpointBucketCooldown = 30 * time.Second
+	// kiroMinRequestInterval is the minimum spacing enforced per credential
+	// between consecutive upstream calls.  Kiro throttles on fast bursts
+	// (CREDIT_CONSUMPTION_RATE_EXCEEDED), so systematically spacing requests
+	// prevents triggering that bucket in the first place.
+	kiroMinRequestInterval = 800 * time.Millisecond
+	// kiroMaxUpstreamBodyBytes is a hard pre-dispatch guard.  Kiro rejects
+	// oversized payloads with HTTP 400 CONTENT_LENGTH_EXCEEDS_THRESHOLD (~400KB
+	// budget); checking before sending avoids a useless round-trip and a wasted
+	// rate-limit slot.
+	kiroMaxUpstreamBodyBytes = 350 * 1024
 )
 
 type KiroExecutionError struct {
@@ -85,17 +102,34 @@ type kiroHTTPExecutor struct {
 	baseURL string
 	client  *http.Client
 	options KiroOptions
+
+	// mu guards the pacing and endpoint-bucket state below.  The executor is a
+	// process singleton shared by all Kiro requests, so concurrent access is
+	// possible and must be serialized.
+	mu sync.Mutex
+	// minInterval tracks the next allowed dispatch time per credential for
+	// request pacing (anti fast-rate-limiting).
+	minInterval map[string]time.Time
+	// endpointUntil tracks, per credential, the earliest time each endpoint
+	// bucket becomes available again after a 429.
+	endpointUntil map[string]map[string]time.Time
 }
 
 // NewKiroHTTPExecutor returns a Kiro executor using the production HTTP client.
 func NewKiroHTTPExecutor() KiroHTTPExecutor {
-	return &kiroHTTPExecutor{baseURL: "", client: &http.Client{}}
+	return &kiroHTTPExecutor{
+		baseURL: "", client: &http.Client{},
+		minInterval: map[string]time.Time{}, endpointUntil: map[string]map[string]time.Time{},
+	}
 }
 
 // NewKiroHTTPExecutorWithOptions returns a Kiro executor with explicit options
 // (e.g. a custom clock for testing or a token refresh lead time override).
 func NewKiroHTTPExecutorWithOptions(options KiroOptions) KiroHTTPExecutor {
-	return &kiroHTTPExecutor{baseURL: "", client: &http.Client{}, options: options}
+	return &kiroHTTPExecutor{
+		baseURL: "", client: &http.Client{}, options: options,
+		minInterval: map[string]time.Time{}, endpointUntil: map[string]map[string]time.Time{},
+	}
 }
 
 // kiroTokenRefreshLeadTime is the duration before token expiry at which the
@@ -141,27 +175,47 @@ func (executor *kiroHTTPExecutor) refreshCredentialIfExpired(
 // them on 429 lets us retry in 2-5s instead of waiting the full 5-minute
 // credit-consumption cooldown.
 type kiroEndpointVariant struct {
-	host     string
+	host      string
 	amzTarget string // empty = no x-amz-target header
 }
 
 // kiroEndpointVariants returns the available API endpoint variants for the
 // given region.  The first entry is the default (runtime); the rest are
-// kiroEndpointVariants returns the upstream endpoints to try.  Only the Kiro
-// runtime endpoint can authenticate a Kiro local/web credential.  The AmazonQ
-// and CodeWhisperer AWS endpoints (q.*.amazonaws.com / codewhisperer.*.amazonaws.com)
-// are NOT valid rotation targets: they use a separate AWS SSO token ecosystem and
-// always reject the Kiro bearer token (403), so rotation to them would turn a
-// clean 429 cooldown into an opaque 502.  Keep a single variant for now; if Kiro
-// later exposes additional runtime endpoints with bearer-token auth, add them here.
+// kiroEnableAwsRotate reports whether rotation to the AWS (AmazonQ / CodeWhisperer)
+// endpoints is enabled.  The Kiro runtime endpoint is always valid for Kiro
+// local/web bearer tokens.  The AWS endpoints are additionally used by the
+// kiro2cc-proxy ecosystem — they carry the same bearer token but a distinct
+// X-Amz-Target header and an independent rate-limit bucket, so rotating to them
+// after a runtime 429 keeps the request flowing instead of cooldowning.  Because
+// those endpoints route through the AWS ecosystem and are not verifiable without
+// a live Kiro token, they are gated behind KIRO_AWS_ROTATE=1 so the safe runtime
+// endpoint stays the default.
+func kiroEnableAwsRotate() bool {
+	return os.Getenv("KIRO_AWS_ROTATE") != ""
+}
+
+// kiroEndpointVariants returns the upstream endpoints to try.  The first entry
+// is the default (runtime).  When AWS rotation is enabled the AmazonQ and
+// CodeWhisperer endpoints follow; each is a distinct bucket whose 429 is tracked
+// independently by the endpoint bucket registry.  runtime.* always authenticates
+// a Kiro local/web bearer token; the AWS endpoints use the same token but a
+// separate X-Amz-Target and are best-effort rotation targets.
 func kiroEndpointVariants(region string) []kiroEndpointVariant {
 	region = strings.ToLower(strings.TrimSpace(region))
 	if region == "" {
 		region = DefaultKiroRegion
 	}
-	return []kiroEndpointVariant{
+	variants := []kiroEndpointVariant{
 		{host: "runtime." + region + ".kiro.dev"},
 	}
+	if kiroEnableAwsRotate() {
+		variants = append(variants,
+			kiroEndpointVariant{host: "q." + region + ".amazonaws.com", amzTarget: kiroAMZTargetMCP},
+			kiroEndpointVariant{host: "codewhisperer.us-east-1.amazonaws.com", amzTarget: kiroAMZTarget},
+			kiroEndpointVariant{host: "q." + region + ".amazonaws.com", amzTarget: ""},
+		)
+	}
+	return variants
 }
 
 // (kiroHTTPExecutor).endpoint returns the Kiro API endpoint URL.
@@ -219,6 +273,124 @@ func (executor *kiroHTTPExecutor) newRequestWithTarget(ctx context.Context, meth
 	return req, nil
 }
 
+// waitForRequestSlot paces per-credential request dispatch so a fast burst of
+// requests does not trip Kiro's CREDIT_CONSUMPTION_RATE_EXCEEDED throttle.  It
+// blocks until the credential's minimum interval has elapsed or the context is
+// done, returning the release time so the caller can also release the slot.
+func (executor *kiroHTTPExecutor) waitForRequestSlot(ctx context.Context, credentialID string) (time.Time, error) {
+	if credentialID == "" {
+		return time.Time{}, nil
+	}
+	now := kiroNow(executor.options)
+	executor.mu.Lock()
+	if executor.minInterval == nil {
+		executor.minInterval = map[string]time.Time{}
+	}
+	next := executor.minInterval[credentialID]
+	if next.Before(now) {
+		next = now
+	}
+	executor.minInterval[credentialID] = next.Add(kiroMinRequestInterval)
+	executor.mu.Unlock()
+	wait := next.Sub(now)
+	if wait <= 0 {
+		return next, nil
+	}
+	select {
+	case <-time.After(wait):
+		return next, nil
+	case <-ctx.Done():
+		return time.Time{}, ctx.Err()
+	}
+}
+
+// blockEndpoint records that a particular endpoint returned 429 for a given
+// credential, keeping that bucket out of rotation for kiroEndpointBucketCooldown.
+func (executor *kiroHTTPExecutor) blockEndpoint(credentialID, host string) {
+	if credentialID == "" || host == "" {
+		return
+	}
+	executor.mu.Lock()
+	if executor.endpointUntil == nil {
+		executor.endpointUntil = map[string]map[string]time.Time{}
+	}
+	buckets := executor.endpointUntil[credentialID]
+	if buckets == nil {
+		buckets = map[string]time.Time{}
+		executor.endpointUntil[credentialID] = buckets
+	}
+	buckets[host] = kiroNow(executor.options).Add(kiroEndpointBucketCooldown)
+	executor.mu.Unlock()
+}
+
+// endpointAvailable reports whether a given endpoint bucket is currently open
+// for the credential (i.e. not in 429 cooldown).
+func (executor *kiroHTTPExecutor) endpointAvailable(credentialID, host string) bool {
+	if credentialID == "" {
+		return true
+	}
+	executor.mu.Lock()
+	defer executor.mu.Unlock()
+	buckets := executor.endpointUntil[credentialID]
+	if buckets == nil {
+		return true
+	}
+	until := buckets[host]
+	return until.Before(kiroNow(executor.options))
+}
+
+// chooseVariants returns the endpoint variants ordered for this attempt: the
+// non-blocked buckets first (default endpoint first when it is open), then the
+// blocked ones (as a last resort).  This keeps rotation on open buckets while
+// still falling back to a cooldowning bucket rather than failing outright.
+func (executor *kiroHTTPExecutor) chooseVariants(credentialID string, region string) []kiroEndpointVariant {
+	variants := kiroEndpointVariants(region)
+	if len(variants) == 0 {
+		variants = kiroEndpointVariants("")
+	}
+	if credentialID == "" {
+		return variants
+	}
+	open := make([]kiroEndpointVariant, 0, len(variants))
+	blocked := make([]kiroEndpointVariant, 0, len(variants))
+	first := variants[0]
+	var firstBlocked bool
+	for _, v := range variants {
+		available := executor.endpointAvailable(credentialID, v.host)
+		if v.host == first.host {
+			firstBlocked = !available
+		}
+		if available {
+			open = append(open, v)
+		} else {
+			blocked = append(blocked, v)
+		}
+	}
+	// Prefer the runtime default among the open buckets so we do not jump to an
+	// AWS endpoint while the runtime bucket is already open.  Only when it is
+	// itself blocked do we promote a different open bucket to the front.
+	if firstBlocked && len(open) > 1 {
+		if open[0].host == first.host {
+			open = append(open[1:], open[0])
+		}
+	}
+	return append(open, blocked...)
+}
+
+// preflightPayload rejects oversized Kiro payloads before dispatch to avoid a
+// wasted round-trip and a rate-limit slot on a request Kiro would reject with
+// HTTP 400 CONTENT_LENGTH_EXCEEDS_THRESHOLD.
+func preflightPayload(body []byte) error {
+	if len(body) > kiroMaxUpstreamBodyBytes {
+		return &KiroExecutionError{
+			status:  http.StatusBadRequest,
+			code:    "CONTENT_LENGTH_EXCEEDS_THRESHOLD",
+			summary: fmt.Sprintf("Kiro payload size %d exceeds the %d-byte pre-dispatch limit", len(body), kiroMaxUpstreamBodyBytes),
+		}
+	}
+	return nil
+}
+
 // (kiroHTTPExecutor).ExecuteCanonical executes a Kiro request and returns an Anthropic-formatted response.
 func (executor *kiroHTTPExecutor) ExecuteCanonical(
 	ctx context.Context,
@@ -248,17 +420,30 @@ func (executor *kiroHTTPExecutor) ExecuteCanonical(
 	if os.Getenv("KIRO_DEBUG_HTTP") != "" {
 		fmt.Fprintf(os.Stderr, "[kiro-debug] request payload bytes=%d input_chars=%d\n", len(body), len(request.Payload))
 	}
-	// Endpoint rotation: on 429, try a different upstream endpoint (each has
-	// an independent rate-limit bucket) instead of waiting the full 5-minute
-	// credit-consumption cooldown.  The first attempt uses the default endpoint;
-	// subsequent retries rotate through alternatives with a short 2-5s backoff.
+	// Pre-dispatch size guard: Kiro rejects oversized payloads with HTTP 400,
+	// so reject locally before spending a rate-limit slot on the trip.
+	if err := preflightPayload(body); err != nil {
+		return ExecuteResponse{}, err
+	}
+	// Request pacing: never fire two upstream calls for the same account within
+	// kiroMinRequestInterval.  This is the primary defense against fast 429s.
+	nextSlot, err := executor.waitForRequestSlot(ctx, credentialID)
+	if err != nil {
+		return ExecuteResponse{}, err
+	}
+	_ = nextSlot
+	// Endpoint rotation on 429: each endpoint is an independent rate-limit
+	// bucket.  The loop re-chooses the order each attempt so a 429-cooldowning
+	// bucket drops to the back, letting us rotate to an open one in ~2s instead
+	// of the full 5-minute credit-consumption cooldown.
 	variants := kiroEndpointVariants(credential.Region)
 	if len(variants) == 0 {
 		variants = kiroEndpointVariants("")
 	}
 	lastErr := error(nil)
 	for attempt := 0; attempt <= kiroEndpointRetries; attempt++ {
-		variant := variants[attempt%len(variants)]
+		ordered := executor.chooseVariants(credentialID, credential.Region)
+		variant := ordered[attempt%len(ordered)]
 		endpointURL := "https://" + variant.host + "/generateAssistantResponse"
 		req, err := executor.newRequestWithTarget(ctx, http.MethodPost, endpointURL, body, variant.amzTarget)
 		if err != nil {
@@ -283,9 +468,20 @@ func (executor *kiroHTTPExecutor) ExecuteCanonical(
 			return ExecuteResponse{}, lastErr
 		}
 		if response.StatusCode == http.StatusTooManyRequests {
+			executor.blockEndpoint(credentialID, variant.host)
 			err := kiroHTTPErrorFromResponse(response)
 			if os.Getenv("KIRO_DEBUG_HTTP") != "" {
-				fmt.Fprintf(os.Stderr, "[kiro-debug] 429 on endpoint %s, returning error with retry-after\n", variant.host)
+				fmt.Fprintf(os.Stderr, "[kiro-debug] 429 on endpoint %s, cooldowning bucket; retrying another endpoint if retries remain\n", variant.host)
+			}
+			if attempt < kiroEndpointRetries && len(variants) > 1 {
+				delay := kiroEndpointRetryBase + time.Duration(attempt)*time.Second
+				select {
+				case <-time.After(delay):
+				case <-ctx.Done():
+					return ExecuteResponse{}, ctx.Err()
+				}
+				lastErr = err
+				continue
 			}
 			return ExecuteResponse{}, err
 		}
@@ -335,68 +531,68 @@ func (executor *kiroHTTPExecutor) ExecuteCanonical(
 			sig         string
 			upstreamErr error
 		)
-	streamErr := parseKiroStream(response.Body, func(event kiroEvent) bool {
-		switch event.Type {
-		case kiroEventAssistantResponse:
-			if strings.TrimSpace(event.Content) != "" {
-				blocks = append(blocks, map[string]any{"type": "text", "text": event.Content})
+		streamErr := parseKiroStream(response.Body, func(event kiroEvent) bool {
+			switch event.Type {
+			case kiroEventAssistantResponse:
+				if strings.TrimSpace(event.Content) != "" {
+					blocks = append(blocks, map[string]any{"type": "text", "text": event.Content})
+				}
+			case kiroEventReasoningContent:
+				if strings.TrimSpace(event.ThinkingText) != "" {
+					thinking = append(thinking, event.ThinkingText)
+				}
+				if strings.TrimSpace(event.Signature) != "" {
+					sig = event.Signature
+				}
+			case kiroEventToolUse:
+				var input any = map[string]any{}
+				if strings.TrimSpace(event.ToolInput) != "" {
+					_ = json.Unmarshal([]byte(event.ToolInput), &input)
+				}
+				blocks = append(blocks, map[string]any{
+					"type": "tool_use", "id": event.ToolUseID, "name": event.ToolName, "input": input,
+				})
+			case kiroEventMetadata:
+				usage = kiroAnthropicUsage(event)
+				stopReason = "end_turn"
+			case kiroEventInvalidState, kiroEventException:
+				// Surface the upstream error instead of silently succeeding on the
+				// partial output accumulated so far.
+				if msg := event.ErrorText(); msg != "" && upstreamErr == nil {
+					upstreamErr = &KiroExecutionError{status: http.StatusBadGateway, code: "upstream", summary: msg}
+				}
 			}
-		case kiroEventReasoningContent:
-			if strings.TrimSpace(event.ThinkingText) != "" {
-				thinking = append(thinking, event.ThinkingText)
-			}
-			if strings.TrimSpace(event.Signature) != "" {
-				sig = event.Signature
-			}
-		case kiroEventToolUse:
-			var input any = map[string]any{}
-			if strings.TrimSpace(event.ToolInput) != "" {
-				_ = json.Unmarshal([]byte(event.ToolInput), &input)
-			}
-			blocks = append(blocks, map[string]any{
-				"type": "tool_use", "id": event.ToolUseID, "name": event.ToolName, "input": input,
-			})
-		case kiroEventMetadata:
-			usage = kiroAnthropicUsage(event)
-			stopReason = "end_turn"
-		case kiroEventInvalidState, kiroEventException:
-			// Surface the upstream error instead of silently succeeding on the
-			// partial output accumulated so far.
-			if msg := event.ErrorText(); msg != "" && upstreamErr == nil {
-				upstreamErr = &KiroExecutionError{status: http.StatusBadGateway, code: "upstream", summary: msg}
-			}
+			return false
+		})
+		if upstreamErr != nil {
+			return ExecuteResponse{}, upstreamErr
 		}
-		return false
-	})
-	if upstreamErr != nil {
-		return ExecuteResponse{}, upstreamErr
-	}
-	if streamErr != nil {
-		return ExecuteResponse{}, &KiroExecutionError{status: http.StatusBadGateway, code: "eventstream", summary: streamErr.Error()}
-	}
-	// Prepend thinking block when present.
-	if len(thinking) > 0 {
-		content := make([]map[string]any, 0, len(blocks)+1)
-		block := map[string]any{"type": "thinking", "thinking": strings.Join(thinking, "")}
-		if sig != "" {
-			block["signature"] = sig
+		if streamErr != nil {
+			return ExecuteResponse{}, &KiroExecutionError{status: http.StatusBadGateway, code: "eventstream", summary: streamErr.Error()}
 		}
-		content = append(content, block)
-		content = append(content, blocks...)
-		blocks = content
-	}
-	if usage == nil {
-		usage = map[string]any{"input_tokens": 0, "output_tokens": 0}
-	}
-	final := map[string]any{
-		"id": "msg_" + randomKiroHex(8), "type": "message", "role": "assistant",
-		"content": blocks, "model": parsed.Model, "stop_reason": stopReason, "stop_sequence": nil,
-		"usage": usage,
-	}
-	raw, err := json.Marshal(final)
-	if err != nil {
-		return ExecuteResponse{}, err
-	}
+		// Prepend thinking block when present.
+		if len(thinking) > 0 {
+			content := make([]map[string]any, 0, len(blocks)+1)
+			block := map[string]any{"type": "thinking", "thinking": strings.Join(thinking, "")}
+			if sig != "" {
+				block["signature"] = sig
+			}
+			content = append(content, block)
+			content = append(content, blocks...)
+			blocks = content
+		}
+		if usage == nil {
+			usage = map[string]any{"input_tokens": 0, "output_tokens": 0}
+		}
+		final := map[string]any{
+			"id": "msg_" + randomKiroHex(8), "type": "message", "role": "assistant",
+			"content": blocks, "model": parsed.Model, "stop_reason": stopReason, "stop_sequence": nil,
+			"usage": usage,
+		}
+		raw, err := json.Marshal(final)
+		if err != nil {
+			return ExecuteResponse{}, err
+		}
 		return ExecuteResponse{Payload: raw, Headers: response.Header.Clone()}, nil
 	}
 	return ExecuteResponse{}, lastErr
@@ -473,14 +669,23 @@ func (executor *kiroHTTPExecutor) ExecuteStreamCanonical(
 	if err != nil {
 		return nil, err
 	}
-	// Endpoint rotation on 429 (same logic as ExecuteCanonical).
+	// Pre-dispatch size guard, same as ExecuteCanonical.
+	if err := preflightPayload(body); err != nil {
+		return nil, err
+	}
+	// Request pacing (same anti-fast-429 defense as ExecuteCanonical).
+	if _, err := executor.waitForRequestSlot(ctx, credentialID); err != nil {
+		return nil, err
+	}
+	// Endpoint rotation on 429 (same per-bucket logic as ExecuteCanonical).
 	variants := kiroEndpointVariants(credential.Region)
 	if len(variants) == 0 {
 		variants = kiroEndpointVariants("")
 	}
 	lastErr := error(nil)
 	for attempt := 0; attempt <= kiroEndpointRetries; attempt++ {
-		variant := variants[attempt%len(variants)]
+		ordered := executor.chooseVariants(credentialID, credential.Region)
+		variant := ordered[attempt%len(ordered)]
 		endpointURL := "https://" + variant.host + "/generateAssistantResponse"
 		req, err := executor.newRequestWithTarget(ctx, http.MethodPost, endpointURL, body, variant.amzTarget)
 		if err != nil {
@@ -505,9 +710,20 @@ func (executor *kiroHTTPExecutor) ExecuteStreamCanonical(
 			return nil, lastErr
 		}
 		if response.StatusCode == http.StatusTooManyRequests {
+			executor.blockEndpoint(credentialID, variant.host)
 			err := kiroHTTPErrorFromResponse(response)
 			if os.Getenv("KIRO_DEBUG_HTTP") != "" {
-				fmt.Fprintf(os.Stderr, "[kiro-debug] 429 on endpoint %s, returning error with retry-after\n", variant.host)
+				fmt.Fprintf(os.Stderr, "[kiro-debug] 429 on endpoint %s, cooldowning bucket; retrying another endpoint if retries remain\n", variant.host)
+			}
+			if attempt < kiroEndpointRetries && len(ordered) > 1 {
+				delay := kiroEndpointRetryBase + time.Duration(attempt)*time.Second
+				select {
+				case <-time.After(delay):
+				case <-ctx.Done():
+					return nil, ctx.Err()
+				}
+				lastErr = err
+				continue
 			}
 			return nil, err
 		}
@@ -734,8 +950,8 @@ func kiroHTTPErrorFromResponse(response *http.Response) error {
 	code := ""
 	if body != "" {
 		var envelope struct {
-			Type   string `json:"__type"`
-			Reason string `json:"reason"`
+			Type    string `json:"__type"`
+			Reason  string `json:"reason"`
 			Message string `json:"message"`
 		}
 		if err := json.Unmarshal([]byte(body), &envelope); err == nil {
