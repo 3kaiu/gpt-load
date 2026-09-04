@@ -193,10 +193,11 @@ type kiroToolUseAccumulator struct {
 	started   bool
 }
 
-// update ingests one toolUseEvent payload. A frame carrying a full toolUseId,
-// non-empty input, and stop=true is emitted immediately. When input arrives
-// split across frames (fragmented), each chunk is appended to the accumulator
-// and emitted on flush at end of stream or when a stop frame arrives.
+// update ingests one toolUseEvent payload. Kiro streams the tool arguments as a
+// JSON string literal fragmented across frames; each fragment carries its own
+// surrounding quotes (and some frames carry a JSON "null" placeholder with no
+// content). The fragment content is accumulated and emitted when a stop frame
+// arrives or on flush.
 func (acc *kiroToolUseAccumulator) update(raw map[string]json.RawMessage) (kiroEvent, bool) {
 	toolUseID := asKiroString(raw["toolUseId"])
 	toolName := asKiroString(raw["name"])
@@ -206,7 +207,8 @@ func (acc *kiroToolUseAccumulator) update(raw map[string]json.RawMessage) (kiroE
 		stop = asKiroBool(s)
 	}
 
-	// Starting a new tool while one is in progress: flush the previous fragment.
+	// Starting a new tool while one is in progress: abandon the previous
+	// incomplete fragment (its stop frame never arrived).
 	if acc.started && toolUseID != "" && toolUseID != acc.toolUseID {
 		acc.started = false
 		acc.toolUseID = ""
@@ -216,12 +218,12 @@ func (acc *kiroToolUseAccumulator) update(raw map[string]json.RawMessage) (kiroE
 	if toolUseID == "" {
 		return kiroEvent{}, false
 	}
-	// Accumulate any input present in this frame.
-	if len(input) > 0 {
-		acc.inputBuf = append(acc.inputBuf, input...)
+	// Accumulate the quoted fragment content. "null" frames carry no content.
+	if content := kiroToolInputFragment(input); content != nil {
+		acc.inputBuf = append(acc.inputBuf, content...)
 	}
 	// Only emit when stop signals the final chunk. Non-stop frames accumulate
-	// their input chunks and return without emitting.
+	// their chunks and return without emitting.
 	if !stop {
 		if !acc.started {
 			acc.toolUseID = toolUseID
@@ -230,12 +232,12 @@ func (acc *kiroToolUseAccumulator) update(raw map[string]json.RawMessage) (kiroE
 		}
 		return kiroEvent{}, false
 	}
-	// stop == true: emit whatever has been accumulated (possibly just this frame's input).
+	// stop == true: emit whatever has been accumulated.
 	result := kiroEvent{
 		Type:      kiroEventToolUse,
 		ToolUseID: toolUseID,
 		ToolName:  toolName,
-		ToolInput: string(acc.inputBuf),
+		ToolInput: kiroDecodeToolInput(acc.inputBuf),
 		ToolStop:  true,
 	}
 	acc.started = false
@@ -254,7 +256,7 @@ func (acc *kiroToolUseAccumulator) flush() (kiroEvent, bool) {
 		Type:      kiroEventToolUse,
 		ToolUseID: acc.toolUseID,
 		ToolName:  acc.toolName,
-		ToolInput: string(acc.inputBuf),
+		ToolInput: kiroDecodeToolInput(acc.inputBuf),
 		ToolStop:  true,
 	}
 	acc.started = false
@@ -262,6 +264,45 @@ func (acc *kiroToolUseAccumulator) flush() (kiroEvent, bool) {
 	acc.toolName = ""
 	acc.inputBuf = nil
 	return event, true
+}
+
+// kiroToolInputFragment strips the surrounding quotes from one toolUseEvent
+// input fragment. Kiro wraps each chunk of the (JSON string encoded) tool
+// arguments in its own quotes; a JSON "null" placeholder carries no content and
+// returns nil.
+func kiroToolInputFragment(raw json.RawMessage) []byte {
+	if len(raw) == 0 {
+		return nil
+	}
+	b := []byte(raw)
+	// "null" (and any bare non-string) placeholder frames contribute nothing.
+	if len(b) > 0 && b[0] != '"' {
+		return nil
+	}
+	if b[0] == '"' {
+		b = b[1:]
+	}
+	if len(b) > 0 && b[len(b)-1] == '"' {
+		b = b[:len(b)-1]
+	}
+	return b
+}
+
+// kiroDecodeToolInput reassembles the accumulated fragment content into the raw
+// tool-arguments JSON. The accumulated buffer is the body of a JSON string
+// literal (in which the tool args are JSON-escaped), so it is wrapped in quotes
+// and unquoted once to recover the argument object text. An unparseable result
+// falls back to an empty object.
+func kiroDecodeToolInput(buf []byte) string {
+	wrapped := make([]byte, 0, len(buf)+2)
+	wrapped = append(wrapped, '"')
+	wrapped = append(wrapped, buf...)
+	wrapped = append(wrapped, '"')
+	var escaped string
+	if err := json.Unmarshal(wrapped, &escaped); err != nil {
+		return ""
+	}
+	return escaped
 }
 
 // asKiroString extracts a JSON string from the raw message.

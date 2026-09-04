@@ -183,21 +183,10 @@ type kiroCurrentMessage struct {
 	UserInputMessage kiroUserInputMessage `json:"userInputMessage"`
 }
 
-// kiroOutputConfig carries the Claude reasoning effort.
-type kiroOutputConfig struct {
-	Effort string `json:"effort,omitempty"`
-}
-
-// kiroAdditionalModelRequestFields is the sibling envelope for model options.
-type kiroAdditionalModelRequestFields struct {
-	OutputConfig *kiroOutputConfig `json:"output_config,omitempty"`
-}
-
 // kiroPayload is the top-level Kiro request body.
 type kiroPayload struct {
-	ConversationState            kiroConversationState             `json:"conversationState"`
-	ProfileARN                   string                            `json:"profileArn,omitempty"`
-	AdditionalModelRequestFields *kiroAdditionalModelRequestFields `json:"additionalModelRequestFields,omitempty"`
+	ConversationState kiroConversationState `json:"conversationState"`
+	ProfileARN        string                `json:"profileArn,omitempty"`
 }
 
 // parseKiroRequest parses an Anthropic Messages JSON request body.
@@ -269,11 +258,10 @@ func extractKiroUserContent(content json.RawMessage) (text string, images []kiro
 	return strings.Join(parts, "\n"), images
 }
 
-// kiroConversationFromRequest converts an Anthropic request into a Kiro payload.
-// It returns the conversation state, the output effort (if any), and the flattened
-// history list. All user tool results and assistant tool uses are folded into the
-// history so the model sees the full multi-turn tool loop.
-func kiroConversationFromRequest(request kiroRequest) (kiroConversationState, string) {
+// kiroConversationFromRequest converts an Anthropic request into a Kiro
+// conversation state. All user tool results and assistant tool uses are folded
+// into the history so the model sees the full multi-turn tool loop.
+func kiroConversationFromRequest(request kiroRequest) kiroConversationState {
 	state := kiroConversationState{
 		ChatTriggerType: kiroChatTriggerManual,
 		AgentTaskType:   kiroAgentTaskTypeVibe,
@@ -375,12 +363,7 @@ func kiroConversationFromRequest(request kiroRequest) (kiroConversationState, st
 	}
 	state.ConversationID = conversationID
 	state.History = history
-
-	effort := ""
-	if request.Thinking != nil && strings.EqualFold(strings.TrimSpace(request.Thinking.Type), "enabled") {
-		effort = "medium"
-	}
-	return state, effort
+	return state
 }
 
 // newKiroMessageID generates a random Kiro message ID.
@@ -493,15 +476,9 @@ func decodeKiroJSONValue(raw json.RawMessage) any {
 
 // buildKiroPayload assembles the final Kiro request body and returns it.
 func buildKiroPayload(request kiroRequest, profileARN string) ([]byte, error) {
-	state, effort := kiroConversationFromRequest(request)
 	payload := kiroPayload{
-		ConversationState: state,
+		ConversationState: kiroConversationFromRequest(request),
 		ProfileARN:        profileARN,
-	}
-	if effort != "" {
-		payload.AdditionalModelRequestFields = &kiroAdditionalModelRequestFields{
-			OutputConfig: &kiroOutputConfig{Effort: effort},
-		}
 	}
 	body, err := json.Marshal(payload)
 	if err != nil {
