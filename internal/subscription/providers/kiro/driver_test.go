@@ -106,3 +106,33 @@ func TestKiroDriverModelDiscoveryDegradesGracefullyWithoutProfile(t *testing.T) 
 		t.Fatal("DiscoverModels returned nil catalog")
 	}
 }
+
+// TestKiroTokenEndpointDecision verifies refresh-failure classification. The
+// critical regression this guards: a 400/401/403 token-endpoint rejection with
+// an empty or unrecognized OAuth code must be treated as ReauthorizationRequired
+// (recoverable via self-heal) and never a permanent OutcomeUnknown, which would
+// brick the credential — exactly what happened to the #4 account.
+func TestKiroTokenEndpointDecision(t *testing.T) {
+	tests := []struct {
+		name       string
+		status     int
+		code       string
+		want       subscriptionruntime.RefreshFailure
+	}{
+		{name: "401 empty code is reauth", status: 401, want: subscriptionruntime.RefreshFailureReauthorizationRequired},
+		{name: "401 invalid_grant is reauth", status: 401, code: "invalid_grant", want: subscriptionruntime.RefreshFailureReauthorizationRequired},
+		{name: "400 invalid_grant is reauth", status: 400, code: "invalid_grant", want: subscriptionruntime.RefreshFailureReauthorizationRequired},
+		{name: "403 empty code is reauth", status: 403, want: subscriptionruntime.RefreshFailureReauthorizationRequired},
+		{name: "429 is retryable", status: 429, want: subscriptionruntime.RefreshFailureRetryable},
+		{name: "500 is retryable", status: 500, want: subscriptionruntime.RefreshFailureRetryable},
+		{name: "404 is outcome_unknown", status: 404, want: subscriptionruntime.RefreshFailureOutcomeUnknown},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := kiroTokenEndpointDecision(tt.status, tt.code, 0)
+			if got.Kind != tt.want {
+				t.Fatalf("kiroTokenEndpointDecision(%d,%q) kind = %v, want %v", tt.status, tt.code, got.Kind, tt.want)
+			}
+		})
+	}
+}

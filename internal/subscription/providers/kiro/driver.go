@@ -4,7 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
 	"strings"
+	"time"
 
 	cpaembedded "github.com/router-for-me/CLIProxyAPI/v7/gptload-embedded/embedded"
 
@@ -82,18 +84,45 @@ func (*kiroDriver) ClassifyRefreshFailure(err error) subscriptionruntime.Refresh
 	}
 	var tokenErr *TokenEndpointError
 	if errors.As(err, &tokenErr) {
-		decision := subscriptionruntime.RefreshFailureDecision{
-			Kind: subscriptionruntime.RefreshFailureOutcomeUnknown, StatusCode: tokenErr.StatusCode,
-			OAuthCode: strings.TrimSpace(tokenErr.Code), RetryAfter: tokenErr.RetryAfter,
-		}
-		if subscriptionruntime.TokenEndpointFailureRetryable(tokenErr.StatusCode, tokenErr.Code) {
-			decision.Kind = subscriptionruntime.RefreshFailureRetryable
-		} else if IsDefinitiveRefreshRejection(tokenErr.Code) {
-			decision.Kind = subscriptionruntime.RefreshFailureReauthorizationRequired
-		}
-		return decision
+		return kiroTokenEndpointDecision(tokenErr.StatusCode, tokenErr.Code, tokenErr.RetryAfter)
 	}
 	return subscriptionruntime.RefreshFailureDecision{Kind: subscriptionruntime.RefreshFailureOutcomeUnknown}
+}
+
+// kiroTokenEndpointDecision classifies a Kiro OAuth token-endpoint failure.
+//
+// Retryable statuses stay retryable; explicit rejection OAuth codes (and any
+// client-error auth status) demand re-authorization; only genuinely ambiguous
+// errors are reported as outcome_unknown. In particular a 400/401/403 with an
+// empty or unrecognized code is a rejection of the stored refresh token /
+// client registration, not an unknowable failure — leaving it permanent
+// outcome_unknown would brick a credential that could instead recover via
+// self-healing on its next refresh.
+func kiroTokenEndpointDecision(statusCode int, oauthCode string, retryAfter time.Duration) subscriptionruntime.RefreshFailureDecision {
+	decision := subscriptionruntime.RefreshFailureDecision{
+		Kind: subscriptionruntime.RefreshFailureOutcomeUnknown, StatusCode: statusCode,
+		OAuthCode: strings.TrimSpace(oauthCode), RetryAfter: retryAfter,
+	}
+	if subscriptionruntime.TokenEndpointFailureRetryable(statusCode, oauthCode) {
+		decision.Kind = subscriptionruntime.RefreshFailureRetryable
+		return decision
+	}
+	if IsDefinitiveRefreshRejection(oauthCode) || kiroRefreshClientError(statusCode) {
+		decision.Kind = subscriptionruntime.RefreshFailureReauthorizationRequired
+	}
+	return decision
+}
+
+// kiroRefreshClientError reports whether the HTTP status reflects a definitive
+// rejection of the presented refresh token / client credentials — always a
+// re-authorization condition, never a transient or unknowable failure.
+func kiroRefreshClientError(statusCode int) bool {
+	switch statusCode {
+	case http.StatusBadRequest, http.StatusUnauthorized, http.StatusForbidden:
+		return true
+	default:
+		return false
+	}
 }
 
 // BeginDeviceAuthorization starts Kiro device authorization flow.

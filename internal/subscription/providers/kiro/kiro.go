@@ -39,6 +39,8 @@ type Credential struct {
 	Region        string `json:"region,omitempty"`
 	ProfileARN    string `json:"profile_arn,omitempty"`
 	TokenEndpoint string `json:"token_endpoint,omitempty"`
+	ClientID      string `json:"client_id,omitempty"`
+	ClientSecret  string `json:"client_secret,omitempty"`
 }
 
 type DeviceAuthorization struct {
@@ -286,7 +288,7 @@ func credentialFromBridge(value cpaembedded.KiroCredential) Credential {
 		RefreshToken: value.RefreshToken, TokenType: value.TokenType, ExpiresIn: value.ExpiresIn,
 		Expire: value.Expire, LastRefresh: value.LastRefresh, AccountID: value.AccountID,
 		Email: value.Email, Region: value.Region, ProfileARN: value.ProfileARN,
-		TokenEndpoint: value.TokenEndpoint,
+		TokenEndpoint: value.TokenEndpoint, ClientID: value.ClientID, ClientSecret: value.ClientSecret,
 	}
 }
 
@@ -297,7 +299,7 @@ func credentialToBridge(value Credential) cpaembedded.KiroCredential {
 		RefreshToken: value.RefreshToken, TokenType: value.TokenType, ExpiresIn: value.ExpiresIn,
 		Expire: value.Expire, LastRefresh: value.LastRefresh, AccountID: value.AccountID,
 		Email: value.Email, Region: value.Region, ProfileARN: value.ProfileARN,
-		TokenEndpoint: value.TokenEndpoint,
+		TokenEndpoint: value.TokenEndpoint, ClientID: value.ClientID, ClientSecret: value.ClientSecret,
 	}
 }
 

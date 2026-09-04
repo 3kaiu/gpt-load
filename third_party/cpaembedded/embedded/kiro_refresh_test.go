@@ -2,6 +2,7 @@ package embedded
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
@@ -117,6 +118,75 @@ func TestKiroRefreshCredentialIfExpiredIgnoresRefreshError(t *testing.T) {
 	if got.AccessToken != "stale" {
 		t.Fatalf("AccessToken = %q, want stale (refresh error must be swallowed)", got.AccessToken)
 	}
+}
+
+// oidcRoundTripper intercepts the AWS SSO OIDC token endpoint and asserts the
+// refresh body carries the registered client credentials.
+type oidcRoundTripper struct {
+	capturedBody string
+	host         string
+}
+
+func (o *oidcRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
+	if req.Method == http.MethodPost && strings.HasSuffix(req.URL.Host, ".amazonaws.com") &&
+		strings.HasSuffix(req.URL.Path, "/token") {
+		o.host = req.URL.Host
+		b, _ := io.ReadAll(req.Body)
+		o.capturedBody = string(b)
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{"Content-Type": []string{"application/json"}},
+			Body:       io.NopCloser(strings.NewReader(`{"accessToken":"fresh-oidc-access","refreshToken":"fresh-oidc-refresh","expiresIn":3600}`)),
+			Request:    req,
+		}, nil
+	}
+	return nil, http.ErrHandlerTimeout
+}
+
+func TestKiroRefreshCredentialOIDC(t *testing.T) {
+	now := time.Now().UTC()
+	expired := KiroCredential{
+		Type: ProviderKiro, AuthKind: string(KiroAuthOIDC),
+		AccessToken: "stale-oidc", RefreshToken: "aor-refresh",
+		ClientID: "client-id", ClientSecret: "client-secret",
+		Expire: now.Add(-time.Minute).Format(time.RFC3339), TokenType: "Bearer",
+	}
+	rt := &oidcRoundTripper{}
+	options := KiroOptions{Region: "us-east-1", HTTPClient: &http.Client{Transport: rt}, Now: func() time.Time { return now }}
+
+	t.Run("expired OIDC refreshed via oidc endpoint", func(t *testing.T) {
+		executor := &kiroHTTPExecutor{baseURL: "", client: &http.Client{}, options: options}
+		got := executor.refreshCredentialIfExpired(context.Background(), expired)
+		if got.AccessToken != "fresh-oidc-access" {
+			t.Fatalf("AccessToken = %q, want fresh-oidc-access", got.AccessToken)
+		}
+		if rt.host != "oidc.us-east-1.amazonaws.com" {
+			t.Fatalf("host = %q, want oidc.us-east-1.amazonaws.com", rt.host)
+		}
+		var body map[string]string
+		if err := json.Unmarshal([]byte(rt.capturedBody), &body); err != nil {
+			t.Fatalf("decode captured body: %v", err)
+		}
+		if body["grantType"] != "refresh_token" {
+			t.Errorf("grantType = %q, want refresh_token", body["grantType"])
+		}
+		if body["clientId"] != "client-id" || body["clientSecret"] != "client-secret" {
+			t.Errorf("client credentials not present in refresh body: %q", rt.capturedBody)
+		}
+		if body["refreshToken"] != "aor-refresh" {
+			t.Errorf("refreshToken not present in refresh body")
+		}
+	})
+
+	t.Run("OIDC without client secret not refreshed", func(t *testing.T) {
+		missing := expired
+		missing.ClientSecret = ""
+		executor := &kiroHTTPExecutor{baseURL: "", client: &http.Client{}, options: options}
+		got := executor.refreshCredentialIfExpired(context.Background(), missing)
+		if got.AccessToken != "stale-oidc" {
+			t.Fatalf("AccessToken = %q, want stale-oidc (no client secret -> unchanged)", got.AccessToken)
+		}
+	})
 }
 
 // mockFailRT always fails the request.

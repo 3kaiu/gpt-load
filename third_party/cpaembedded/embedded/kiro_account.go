@@ -44,29 +44,56 @@ type KiroAccountObservation struct {
 	IncompleteSources []string
 }
 
-// ObserveKiroAccount self-explores the running machine for the Kiro account
-// managed by the Kiro desktop app / AWS SSO cache. Unlike cloud account
-// introspection (which Kiro does not expose publicly), the quota mirror is
-// read directly from the local app state, matching what freecode observes.
+// ObserveKiroAccount observes the Kiro account managed by the credential. It
+// prefers the live remote quota plane (GetUsageLimits on the AWS CodeWhisperer
+// Runtime), which reflects current usage without depending on a fresh local
+// desktop mirror, and falls back to the local desktop mirror when the remote
+// plane is unavailable. Identity is bound to the credential being monitored so
+// one account's exhaustion never triggers another's rotation.
 func ObserveKiroAccount(ctx context.Context, credential KiroCredential, options KiroOptions) (KiroAccountObservation, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	discovery, err := DiscoverKiroLocal()
-	if err != nil {
-		return KiroAccountObservation{IncompleteSources: []string{"local_mirror"}}, ErrKiroAccountObservationUnavailable
-	}
+	normalizeKiroCredential(&credential)
 	observation := KiroAccountObservation{
 		Header:            http.Header{},
-		AccountObserved:   discovery.TokenFound || discovery.Usage != nil,
-		LoadedViaFreecode: true,
+		AccountObserved:   true,
 		IncompleteSources: []string{},
 	}
-	// Bind the observation to the credential being monitored: if the credential
-	// carries an account identity and the currently discovered local account
-	// differs, the usage mirrors belong to a different account. Reporting them
-	// would let one account's exhaustion trigger a rotation of another, so mark
-	// the quota unobserved instead.
+	// Remote usage is the preferred, primary source: it reflects live usage
+	// even when the local desktop app has not refreshed its mirror. A stored
+	// bearer token can expire on disk (short-lived IdC/SSO access tokens), which
+	// would otherwise make the remote call fail with 401/403 and silently fall
+	// back to the local mirror (often reporting stale/zero usage). Refresh the
+	// account's own token first so the remote plane is reached with a fresh
+	// access token — this keeps every stored account self-contained by using its
+	// own persisted OIDC/social client rather than the currently active desktop
+	// login.
+	credential = refreshKiroCredentialIfExpired(ctx, credential, options)
+	remote, remoteErr := DiscoverKiroUsageLimits(ctx, credential, options)
+	if remoteErr == nil && remote != nil && len(remote.Breaks) > 0 {
+		observation.ModelID = strings.TrimSpace(remote.ModelID)
+		meters := make([]KiroUsageMeter, 0, len(remote.Breaks))
+		for _, brk := range remote.Breaks {
+			meters = append(meters, kiroMeterFromBreak(brk))
+		}
+		observation.Usage.Meters = meters
+		observation.AccountObserved = true
+		observation.AccountQuotaObserved = len(meters) > 0
+		observation.CreditQuotaObserved = hasKiroCreditMeter(meters)
+		return observation, nil
+	}
+	if remoteErr != nil {
+		observation.IncompleteSources = append(observation.IncompleteSources, "remote_usage")
+	}
+	// Fall back to the local desktop mirror for quota self-exploration.
+	discovery, err := DiscoverKiroLocal()
+	if err != nil {
+		observation.IncompleteSources = append(observation.IncompleteSources, "local_mirror")
+		return observation, ErrKiroAccountObservationUnavailable
+	}
+	observation.AccountObserved = discovery.TokenFound || discovery.Usage != nil
+	observation.LoadedViaFreecode = true
 	identityMismatch := strings.TrimSpace(credential.AccountID) != "" &&
 		discovery.AccountID != "" &&
 		!strings.EqualFold(strings.TrimSpace(discovery.AccountID), strings.TrimSpace(credential.AccountID))
@@ -76,18 +103,56 @@ func ObserveKiroAccount(ctx context.Context, credential KiroCredential, options 
 		observation.ModelID = strings.TrimSpace(discovery.Usage.ModelID)
 		meters := make([]KiroUsageMeter, 0, len(discovery.Usage.Breaks))
 		for _, brk := range discovery.Usage.Breaks {
-			meters = append(meters, KiroUsageMeter{
-				DisplayName: brk.DisplayName, Unit: brk.Unit,
-				CurrentUsage: brk.CurrentUsage, UsageLimit: brk.UsageLimit,
-				UsageLimitExplicit: brk.UsageLimitExplicit, PercentageUsed: brk.PercentageUsed,
-				ResetDate: brk.ResetDate,
-			})
+			meters = append(meters, kiroMeterFromBreak(brk))
 		}
 		observation.Usage.Meters = meters
 		observation.AccountQuotaObserved = len(meters) > 0
 		observation.CreditQuotaObserved = hasKiroCreditMeter(meters)
 	}
 	return observation, nil
+}
+
+// kiroMeterFromBreak converts a KiroUsageBreak into a normalized usage meter.
+func kiroMeterFromBreak(brk KiroUsageBreak) KiroUsageMeter {
+	return KiroUsageMeter{
+		DisplayName: brk.DisplayName, Unit: brk.Unit,
+		CurrentUsage: brk.CurrentUsage, UsageLimit: brk.UsageLimit,
+		UsageLimitExplicit: brk.UsageLimitExplicit, PercentageUsed: brk.PercentageUsed,
+		ResetDate: brk.ResetDate,
+	}
+}
+
+// refreshKiroCredentialIfExpired refreshes an OAuth Kiro credential when its
+// access token is missing, already expired, or within the refresh lead time of
+// expiring. It uses the account's own persisted client (standalone OIDC/social
+// refresh) so the refreshed token is bound to this stored account, independent
+// of whichever login is currently active on the desktop. Refresh failures are
+// intentionally non-fatal: the caller falls back to the existing token (and the
+// observe path's local-mirror fallback still applies).
+func refreshKiroCredentialIfExpired(ctx context.Context, credential KiroCredential, options KiroOptions) KiroCredential {
+	kind := KiroAuthKind(credential.AuthKind)
+	if kind != KiroAuthSocial && kind != KiroAuthOIDC {
+		return credential
+	}
+	if strings.TrimSpace(credential.RefreshToken) == "" {
+		return credential
+	}
+	if kind == KiroAuthOIDC &&
+		(strings.TrimSpace(credential.ClientID) == "" || strings.TrimSpace(credential.ClientSecret) == "") {
+		// An OIDC credential without its own client registration cannot refresh
+		// standalone; leave the stored (possibly stale) token as-is.
+		return credential
+	}
+	if expiration, ok := KiroCredentialExpiresAt(credential); ok {
+		if expiration.After(kiroNow(options).Add(kiroTokenRefreshLeadTime)) {
+			return credential
+		}
+	}
+	refreshed, err := RefreshKiroCredentialOnce(ctx, credential, options)
+	if err != nil {
+		return credential
+	}
+	return refreshed
 }
 
 // hasKiroCreditMeter checks if the Kiro usage state has a credit meter entry.

@@ -55,6 +55,12 @@ type KiroCredential struct {
 	Region        string `json:"region,omitempty"`
 	ProfileARN    string `json:"profile_arn,omitempty"`
 	TokenEndpoint string `json:"token_endpoint,omitempty"`
+	// ClientID and ClientSecret are the AWS SSO OIDC client registration
+	// (from the ~/.aws/sso/cache/{clientIdHash}.json file). They are required
+	// to refresh a BuilderId / IdC ("oidc" auth_kind) token against the
+	// oidc.{region}.amazonaws.com/token endpoint.
+	ClientID     string `json:"client_id,omitempty"`
+	ClientSecret string `json:"client_secret,omitempty"`
 	// KnownLocally is set by self-exploration when the credential was discovered
 	// on disk (e.g. the Kiro desktop / AWS SSO token cache) rather than imported
 	// or obtained through device authorization. It is not serialized.
@@ -68,6 +74,10 @@ type KiroOptions struct {
 	RuntimeHost         string
 	ManagementHost      string
 	AuthHost            string
+	// CodewhispererHost overrides the AWS CodeWhisperer Runtime host used by
+	// remote usage discovery (GetUsageLimits). Test-only seam; production
+	// callers leave it empty so the fixed service discovery URL is used.
+	CodewhispererHost   string
 	HTTPClient          *http.Client
 	Now                 func() time.Time
 	TokenRefreshLeadTime time.Duration
@@ -197,6 +207,7 @@ func kiroCanonicalFields() map[string]struct{} {
 		"type": {}, "auth_kind": {}, "access_token": {}, "refresh_token": {},
 		"token_type": {}, "expires_in": {}, "expired": {}, "last_refresh": {},
 		"account_id": {}, "email": {}, "region": {}, "profile_arn": {}, "token_endpoint": {},
+		"client_id": {}, "client_secret": {},
 	}
 }
 
@@ -220,6 +231,8 @@ func normalizeKiroCredential(credential *KiroCredential) {
 	credential.Region = strings.TrimSpace(credential.Region)
 	credential.ProfileARN = strings.TrimSpace(credential.ProfileARN)
 	credential.TokenEndpoint = strings.TrimSpace(credential.TokenEndpoint)
+	credential.ClientID = strings.TrimSpace(credential.ClientID)
+	credential.ClientSecret = strings.TrimSpace(credential.ClientSecret)
 	if credential.Region == "" {
 		credential.Region = DefaultKiroRegion
 	}
@@ -245,6 +258,11 @@ func validateKiroCredentialWithOptions(credential KiroCredential, options KiroOp
 		if strings.TrimSpace(credential.AccessToken) == "" || strings.TrimSpace(credential.RefreshToken) == "" {
 			return fmt.Errorf("credential tokens are required")
 		}
+		if kind == KiroAuthOIDC {
+			if strings.TrimSpace(credential.ClientID) == "" || strings.TrimSpace(credential.ClientSecret) == "" {
+				return fmt.Errorf("oidc credential client credentials are required")
+			}
+		}
 		// profile_arn is intentionally optional: Kiro authenticates with the
 		// bearer access token, and a self-discovered account (see kiro_discovery)
 		// does not persist profileArn on disk. Discovery/model endpoints that need
@@ -267,11 +285,14 @@ func validateKiroCredentialWithOptions(credential KiroCredential, options KiroOp
 	for field, value := range map[string]string{
 		"account_id": credential.AccountID, "email": credential.Email,
 		"region": credential.Region, "profile_arn": credential.ProfileARN,
-		"token_endpoint": credential.TokenEndpoint,
+		"token_endpoint": credential.TokenEndpoint, "client_id": credential.ClientID,
 	} {
-		if len(value) > 2048 || strings.ContainsAny(value, "\r\n\x00") {
+		if len(value) > 4096 || strings.ContainsAny(value, "\r\n\x00") {
 			return fmt.Errorf("credential %s is invalid", field)
 		}
+	}
+	if len(credential.ClientSecret) > 16384 || strings.ContainsAny(credential.ClientSecret, "\r\n\x00") {
+		return fmt.Errorf("credential client_secret is invalid")
 	}
 	region := strings.TrimSpace(credential.Region)
 	if region == "" {
@@ -328,7 +349,7 @@ func KiroCredentialExpiresAt(credential KiroCredential) (time.Time, bool) {
 func (credential KiroCredential) SecretValues() []string {
 	return []string{
 		credential.AccessToken, credential.RefreshToken, credential.AccountID,
-		credential.Email, credential.ProfileARN,
+		credential.Email, credential.ProfileARN, credential.ClientID, credential.ClientSecret,
 	}
 }
 

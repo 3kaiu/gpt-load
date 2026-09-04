@@ -147,11 +147,15 @@ func (executor *kiroHTTPExecutor) refreshCredentialIfExpired(
 	ctx context.Context,
 	credential KiroCredential,
 ) KiroCredential {
-	if KiroAuthKind(credential.AuthKind) != KiroAuthSocial {
+	kind := KiroAuthKind(credential.AuthKind)
+	if kind != KiroAuthSocial && kind != KiroAuthOIDC {
 		return credential
 	}
 	refreshToken := strings.TrimSpace(credential.RefreshToken)
 	if refreshToken == "" {
+		return credential
+	}
+	if kind == KiroAuthOIDC && (strings.TrimSpace(credential.ClientID) == "" || strings.TrimSpace(credential.ClientSecret) == "") {
 		return credential
 	}
 	if expiration, ok := KiroCredentialExpiresAt(credential); ok {

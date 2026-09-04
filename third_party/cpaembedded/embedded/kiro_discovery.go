@@ -62,6 +62,19 @@ type kiroTokenCache struct {
 	ExpiresAt    string `json:"expiresAt"`
 	Provider     string `json:"provider"`
 	ClientIDHash string `json:"clientIdHash"`
+	// AuthMethod distinguishes the token serving method. "IdC" (provider
+	// "BuilderId" / enterprise) uses the AWS SSO OIDC refresh endpoint and
+	// requires the registered clientId/clientSecret; empty/other values use the
+	// Kiro desktop social refresh endpoint.
+	AuthMethod string `json:"authMethod"`
+}
+
+// kiroClientCredentialCache is the on-disk shape of the sibling AWS SSO cache
+// file ~/.aws/sso/cache/{clientIdHash}.json, which holds the OIDC client
+// registration used to refresh a BuilderId / IdC token.
+type kiroClientCredentialCache struct {
+	ClientID     string `json:"clientId"`
+	ClientSecret string `json:"clientSecret"`
 }
 
 // kiroAccountIDFromRefreshToken derives a stable per-account identity from the
@@ -148,6 +161,32 @@ func kiroTokenCachePaths() []string {
 	return []string{
 		filepath.Join(base, "kiro-auth-token.json"),
 	}
+}
+
+// readKiroClientCredentials reads the registered AWS SSO OIDC client
+// (clientId/clientSecret) from the sibling cache file
+// ~/.aws/sso/cache/{clientIdHash}.json. A BuilderId / IdC token must be
+// refreshed with this registration; when it is missing the caller should treat
+// the credential as unable to be programmatically refreshed.
+func readKiroClientCredentials(clientIDHash string) (string, string) {
+	clientIDHash = strings.TrimSpace(clientIDHash)
+	if clientIDHash == "" {
+		return "", ""
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", ""
+	}
+	path := filepath.Join(home, ".aws", "sso", "cache", clientIDHash+".json")
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return "", ""
+	}
+	var client kiroClientCredentialCache
+	if err := json.Unmarshal(raw, &client); err != nil {
+		return "", ""
+	}
+	return strings.TrimSpace(client.ClientID), strings.TrimSpace(client.ClientSecret)
 }
 
 // kiroVSCDBPaths returns the Kiro desktop app global-state DB locations.
@@ -239,6 +278,17 @@ func readKiroTokenCache() (KiroCredential, bool, error) {
 			TokenType:    "Bearer",
 			Region:       region,
 			ProfileARN:   "",
+		}
+		// A BuilderId / enterprise (AWS SSO IdC) token must be refreshed against
+		// the oidc.{region}.amazonaws.com/token endpoint using the registered
+		// client, not Kiro's desktop social endpoint. Detect it from the cache
+		// authMethod and carry the clientId/clientSecret from the sibling SSO
+		// cache file so refresh can authenticate.
+		if strings.EqualFold(strings.TrimSpace(cache.AuthMethod), "IdC") {
+			credential.AuthKind = string(KiroAuthOIDC)
+			clientID, clientSecret := readKiroClientCredentials(strings.TrimSpace(cache.ClientIDHash))
+			credential.ClientID = clientID
+			credential.ClientSecret = clientSecret
 		}
 		// clientIdHash is the Kiro application's client ID (same across all
 		// accounts on this machine), NOT an account identifier. Use the
